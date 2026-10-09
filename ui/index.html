@@ -10,15 +10,17 @@
 <body>
 <header>
   <div class="brand"><img src="/icon.svg" alt=""><span>CUEd</span><small id="desktop-name"></small></div>
-  <nav>
+  <nav id="main-nav">
     <button data-tab="link" class="active">Link a phone</button>
     <button data-tab="library">Library</button>
     <button data-tab="backup">Backup</button>
     <button data-tab="stations">Stations</button>
+    <button data-tab="friends">Friends</button>
     <button data-tab="relay">Relay &amp; funnel</button>
     <button data-tab="downloads">Downloads</button>
     <button data-tab="settings">Settings</button>
   </nav>
+  <button id="mini-open" class="icon-btn" title="Show the player" hidden>♪</button>
   <div class="live" id="live-dot" title="live connection to cuedd"></div>
 </header>
 
@@ -65,6 +67,7 @@
   </section>
 
   <section id="tab-stations" class="tab">
+    <div id="listen-now-stations" class="listen"></div>
     <div class="cols">
       <div class="card">
         <h2>Following</h2>
@@ -82,10 +85,33 @@
     </div>
   </section>
 
+  <section id="tab-friends" class="tab">
+    <div id="listen-now-friends" class="listen"></div>
+    <div class="cols">
+      <div class="card">
+        <h2>Your friend code</h2>
+        <p class="muted">A friend sees your public key, your name and what your station plays, nothing else. Scan each other's code and you are friends at once; scanning one way sends a request.</p>
+        <div class="qr small-qr" id="friend-qr"></div>
+        <code id="friend-link" class="wrap"></code>
+        <p class="muted small">NFC: tap two phones with CUEd open to exchange friend codes. The desktop has no NFC, so here it is the QR code and the link above.</p>
+        <h3>Add a friend</h3>
+        <form id="friend-form" class="row"><input id="friend-text" placeholder="cued://friend?… or npub1…" required><button class="primary">Send request</button></form>
+      </div>
+      <div class="card">
+        <h2>Requests</h2>
+        <div id="friend-requests" class="list"></div>
+        <h2 class="spaced">Friends</h2>
+        <div id="friends-list" class="list"></div>
+        <p class="muted small">Friends are followed as stations automatically. "Listen" plays along with what a friend is playing right now; it needs their <em>friend streaming</em> switch to be on.</p>
+      </div>
+    </div>
+  </section>
+
   <section id="tab-relay" class="tab">
     <div class="cols">
       <div class="card">
-        <h2>Embedded relay</h2>
+        <h2>Embedded relay <span id="relay-enabled-badge" class="badge">off</span></h2>
+        <label class="switch"><input type="checkbox" data-shared="relayEnabled"><span><b>Desktop relay</b><span class="muted small block">Off by default. Synced to every device of this account.</span></span></label>
         <p>Phones add <code id="relay-url"></code> under Stations → relays. Their social traffic then goes through this desktop; nothing else sees who follows whom.</p>
         <div id="relay-stats" class="kv"></div>
         <h3>Upstream relays</h3>
@@ -114,39 +140,99 @@
   </section>
 
   <section id="tab-settings" class="tab">
-    <div class="card">
-      <h2>Settings</h2>
-      <form id="settings-form" class="form">
-        <label>Desktop name <input name="name"></label>
-        <label>Crossfade seconds <input name="crossfade_seconds" type="number" min="0" max="20" step="0.5"></label>
-        <label>Crossfade curve <select name="crossfade_curve"><option value="0">Equal power</option><option value="1">Linear</option><option value="2">Smooth step</option></select></label>
-        <label>Companion format <select name="companion_format"><option>m4a</option><option>mp3</option><option>opus</option><option>flac</option></select></label>
-        <button class="primary">Save</button>
-      </form>
-      <div id="about" class="kv"></div>
+    <div class="settings">
+      <nav class="subnav" id="settings-nav">
+        <button data-sub="general" class="active">General</button>
+        <button data-sub="theme">Theme colours</button>
+        <button data-sub="account">Account</button>
+        <button data-sub="relay">Relay &amp; privacy</button>
+      </nav>
+      <div class="subpages">
+        <div id="settings-general" class="sub active">
+          <div class="card">
+            <h2>General</h2>
+            <form id="settings-form" class="form">
+              <label>Desktop name <input name="name"></label>
+              <label>Crossfade seconds <input name="crossfade_seconds" type="number" min="0" max="20" step="0.5"></label>
+              <label>Crossfade curve <select name="crossfade_curve"><option value="0">Equal power</option><option value="1">Linear</option><option value="2">Smooth step</option></select></label>
+              <label>Companion format <select name="companion_format"><option>m4a</option><option>mp3</option><option>opus</option><option>flac</option></select></label>
+              <button class="primary">Save</button>
+            </form>
+            <div id="about" class="kv"></div>
+          </div>
+        </div>
+
+        <div id="settings-theme" class="sub">
+          <div class="card">
+            <h2>Theme colours</h2>
+            <p class="muted">Pick a preset or adjust each colour; the page previews as you drag. Saved colours are written to the account chain, so the phones of this account pick them up too.</p>
+            <div class="presets" id="theme-presets"></div>
+            <div class="swatches" id="theme-inputs"></div>
+            <div class="row"><button id="theme-save" class="primary">Save</button><button id="theme-revert">Revert</button><button id="theme-reset">Reset to default</button><span id="theme-state" class="muted small"></span></div>
+          </div>
+        </div>
+
+        <div id="settings-account" class="sub">
+          <div class="card">
+            <h2>Account</h2>
+            <p class="muted">An account is one key pair shared by every device you bind to it. Others only ever see the public key (the <code>npub</code>) and the name; the private key stays on your devices and in sealed transfers between them.</p>
+            <dl class="kv">
+              <dt>Public key</dt><dd><div class="row tight"><code id="acct-npub" class="wrap grow"></code><button id="acct-copy">Copy</button></div></dd>
+              <dt>Name</dt><dd><form id="acct-name-form" class="row tight"><input id="acct-name" placeholder="Shown to friends"><button>Rename</button></form></dd>
+              <dt>Chain height</dt><dd id="acct-height"></dd>
+              <dt>Tip</dt><dd><code id="acct-tip" class="small"></code></dd>
+            </dl>
+            <h3>Devices on this account</h3>
+            <div id="acct-devices" class="list"></div>
+            <p class="muted small">Unbinding appends a block to the chain; the device keeps its copy of the key until it is wiped there.</p>
+            <h3>Private key</h3>
+            <p class="muted small">Whoever holds the private key <em>is</em> this account. Keep it to yourself; only the public key is ever shown to friends, stations and relays.</p>
+            <div class="row tight"><button id="acct-reveal">Reveal private key</button><code id="acct-nsec" class="wrap grow" hidden></code></div>
+            <h3>Start over</h3>
+            <div class="row tight"><button id="acct-new" class="danger">Start a new account</button><span class="muted small">Makes a fresh key pair; the old one is backed up on disk. Friends and phones bound to the old key will not follow.</span></div>
+          </div>
+        </div>
+
+        <div id="settings-relay" class="sub">
+          <div class="card">
+            <h2>Relay &amp; privacy</h2>
+            <p class="muted">These two switches live in the account chain and apply to every device of this account at once.</p>
+            <label class="switch"><input type="checkbox" data-shared="relayEnabled"><span><b>Desktop relay</b><span class="muted small block">Off by default. When on, this desktop's relay at <code id="relay-url2"></code> accepts connections and mirrors to the upstream relays; while off it answers 403 and nothing leaves. Turning it on from any device turns it on everywhere.</span></span></label>
+            <label class="switch"><input type="checkbox" data-shared="friendStreaming"><span><b>Let friends stream what I play</b><span class="muted small block">Adds short-lived stream, cover and lyrics links to your station, for friends only, for the track playing now and the next three. Off means friends see titles but hear nothing from here.</span></span></label>
+            <div id="relay-mini-stats" class="kv"></div>
+            <p class="muted small">Upstream relays, mirroring and the funnel are under <a href="#relay">Relay &amp; funnel</a>.</p>
+          </div>
+        </div>
+      </div>
     </div>
   </section>
 </main>
 
-<footer id="player">
-  <canvas id="spectrum" width="640" height="48"></canvas>
-  <div class="now">
-    <div id="now-title">Nothing playing</div>
-    <div id="now-artist" class="muted small"></div>
+<aside id="mini" aria-label="Player">
+  <div class="cover-ph"></div>
+  <img id="mini-cover" class="cover" alt="">
+  <div class="shade"></div>
+  <canvas id="spectrum" width="150" height="60"></canvas>
+  <div class="mini-top">
+    <button id="mini-lyrics" class="mini-btn" title="Lyrics"><i>L</i></button>
+    <button id="mini-close" class="mini-btn" title="Hide the player">×</button>
   </div>
-  <div class="controls">
-    <button id="p-play" title="Play / pause">▶</button>
-    <button id="p-next" title="Next (crossfade)">⏭</button>
-    <button id="p-stop" title="Stop">■</button>
-    <input id="p-seek" type="range" min="0" max="1000" value="0">
-    <span id="p-time" class="muted small">0:00</span>
-    <input id="p-vol" type="range" min="0" max="100" value="100" title="Volume">
-    <span id="p-queue" class="muted small"></span>
+  <div id="lyrics" class="lyrics"><div id="lyrics-inner" class="lyrics-inner"></div></div>
+  <div class="mini-bottom">
+    <label class="vol"><span class="muted">vol</span><input id="p-vol" type="range" min="0" max="100" value="100" title="Volume"></label>
+    <div class="now"><b id="now-title">Nothing playing</b><span id="now-artist"></span></div>
+    <div class="ctl">
+      <button id="p-play" title="Play / pause">▶</button>
+      <button id="p-next" title="Next (crossfade)">⏭</button>
+      <span id="p-time" class="small">0:00</span>
+      <span id="p-queue" class="small muted"></span>
+    </div>
   </div>
-</footer>
+  <input id="p-seek" type="range" min="0" max="1000" value="0" title="Seek">
+</aside>
 
 <div id="toast"></div>
-<template id="share-dialog"><div class="modal"><div class="card"><h2>Send to a phone</h2><p class="muted small">On the phone: Receive → Scan a QR code. The link works for 30 minutes; the phone pulls the file straight from this desktop.</p><div class="qr"></div><code class="wrap"></code><button class="primary close">Done</button></div></div></template>
+<template id="share-dialog"><div class="modal"><div class="card"><h2>Send to a phone</h2><p class="muted small">On the phone: Receive → Scan a QR code. The link works for 30 minutes; the phone pulls the file straight from this desktop.</p><div class="qr"></div><code class="wrap"></code><label class="check"><input type="checkbox" class="share-friend"> Send a friend request with it</label><p class="muted small">With the request, the link also carries your public key and name; the receiver can accept it with one tap.</p><button class="primary close">Done</button></div></div></template>
 <script src="/app.js"></script>
 </body>
 </html>

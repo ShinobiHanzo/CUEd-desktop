@@ -2,12 +2,15 @@
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 
 use crate::api::App;
 use crate::state::UiEvent;
 
 pub async fn handler(State(s): State<App>, ws: WebSocketUpgrade) -> Response {
+    if !s.relay_enabled() {
+        return crate::api::ApiError::forbidden("the desktop relay is off: turn it on under Settings → Relay & privacy (it syncs to every device of the account)").into_response();
+    }
     ws.max_message_size(256 * 1024).on_upgrade(move |socket| serve(socket, s))
 }
 

@@ -20,6 +20,24 @@ pub struct Device {
     pub last_seen: i64,
     pub last_manifest: i64,
     pub last_upload: i64,
+    /// P-256 public key for biometric assertions, SEC1 hex; empty when the phone registered none.
+    #[serde(skip_serializing)]
+    pub biokey: String,
+    pub devhash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Friend {
+    pub pubkey: String,
+    pub npub: String,
+    pub name: String,
+    /// `pending_out`, `pending_in` or `friends`.
+    pub status: String,
+    pub relays: Vec<String>,
+    #[serde(rename = "addedAt")]
+    pub added_at: i64,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: i64,
 }
 
 /// One manifest entry from a phone, as in `docs/protocol.md` §3.
@@ -110,8 +128,13 @@ impl Db {
                 device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE, name TEXT NOT NULL, size INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL, PRIMARY KEY(device_id, name));
             CREATE TABLE IF NOT EXISTS follows(pubkey TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', relays TEXT NOT NULL DEFAULT '[]', added_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS friends(pubkey TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, relays TEXT NOT NULL DEFAULT '[]', added_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
             "#,
         )?;
+        for col in ["biokey TEXT NOT NULL DEFAULT ''", "devhash TEXT NOT NULL DEFAULT ''"] {
+            // Older databases: add the column; "duplicate column" is the only expected error.
+            let _ = conn.execute(&format!("ALTER TABLE devices ADD COLUMN {col}"), []);
+        }
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -122,30 +145,30 @@ impl Db {
 
     // ---- devices ----
 
-    pub fn add_device(&self, id: &str, name: &str, pubkey: &str, token_hash: &str) -> anyhow::Result<Device> {
+    pub fn add_device(&self, id: &str, name: &str, pubkey: &str, token_hash: &str, biokey: &str, devhash: &str) -> anyhow::Result<Device> {
         let now = now_ms();
         self.with(|c| {
             c.execute(
-                "INSERT INTO devices(id,name,pubkey,token_hash,paired_at,last_seen) VALUES(?1,?2,?3,?4,?5,?5)",
-                params![id, name, pubkey, token_hash, now],
+                "INSERT INTO devices(id,name,pubkey,token_hash,paired_at,last_seen,biokey,devhash) VALUES(?1,?2,?3,?4,?5,?5,?6,?7)",
+                params![id, name, pubkey, token_hash, now, biokey, devhash],
             )
         })?;
-        Ok(Device { id: id.into(), name: name.into(), pubkey: pubkey.into(), paired_at: now, last_seen: now, last_manifest: 0, last_upload: 0 })
+        Ok(Device { id: id.into(), name: name.into(), pubkey: pubkey.into(), paired_at: now, last_seen: now, last_manifest: 0, last_upload: 0, biokey: biokey.into(), devhash: devhash.into() })
     }
 
     pub fn device_by_token_hash(&self, token_hash: &str) -> anyhow::Result<Option<Device>> {
         self.with(|c| {
-            c.query_row("SELECT id,name,pubkey,paired_at,last_seen,last_manifest,last_upload FROM devices WHERE token_hash=?1", params![token_hash], row_device).optional()
+            c.query_row("SELECT id,name,pubkey,paired_at,last_seen,last_manifest,last_upload,biokey,devhash FROM devices WHERE token_hash=?1", params![token_hash], row_device).optional()
         })
     }
 
     pub fn device(&self, id: &str) -> anyhow::Result<Option<Device>> {
-        self.with(|c| c.query_row("SELECT id,name,pubkey,paired_at,last_seen,last_manifest,last_upload FROM devices WHERE id=?1", params![id], row_device).optional())
+        self.with(|c| c.query_row("SELECT id,name,pubkey,paired_at,last_seen,last_manifest,last_upload,biokey,devhash FROM devices WHERE id=?1", params![id], row_device).optional())
     }
 
     pub fn devices(&self) -> anyhow::Result<Vec<Device>> {
         self.with(|c| {
-            let mut st = c.prepare("SELECT id,name,pubkey,paired_at,last_seen,last_manifest,last_upload FROM devices ORDER BY paired_at")?;
+            let mut st = c.prepare("SELECT id,name,pubkey,paired_at,last_seen,last_manifest,last_upload,biokey,devhash FROM devices ORDER BY paired_at")?;
             let rows = st.query_map([], row_device)?;
             rows.collect()
         })
@@ -153,6 +176,11 @@ impl Db {
 
     pub fn remove_device(&self, id: &str) -> anyhow::Result<bool> {
         Ok(self.with(|c| c.execute("DELETE FROM devices WHERE id=?1", params![id]))? > 0)
+    }
+
+    pub fn set_device_pubkey(&self, id: &str, pubkey: &str) -> anyhow::Result<()> {
+        self.with(|c| c.execute("UPDATE devices SET pubkey=?2 WHERE id=?1", params![id, pubkey]))?;
+        Ok(())
     }
 
     pub fn touch_device(&self, id: &str, manifest: bool, upload: bool) -> anyhow::Result<()> {
@@ -348,10 +376,55 @@ impl Db {
     pub fn remove_follow(&self, pubkey: &str) -> anyhow::Result<bool> {
         Ok(self.with(|c| c.execute("DELETE FROM follows WHERE pubkey=?1", params![pubkey]))? > 0)
     }
+
+    // ---- friends ----
+
+    pub fn friends(&self) -> anyhow::Result<Vec<Friend>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT pubkey,name,status,relays,added_at,updated_at FROM friends ORDER BY status, name, added_at")?;
+            let rows = st.query_map([], row_friend)?;
+            rows.collect()
+        })
+    }
+
+    pub fn friend(&self, pubkey: &str) -> anyhow::Result<Option<Friend>> {
+        self.with(|c| c.query_row("SELECT pubkey,name,status,relays,added_at,updated_at FROM friends WHERE pubkey=?1", params![pubkey], row_friend).optional())
+    }
+
+    /// Inserts or updates; an empty `name` keeps the stored one.
+    pub fn set_friend(&self, pubkey: &str, name: &str, status: &str, relays: &[String]) -> anyhow::Result<Friend> {
+        let now = now_ms();
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO friends(pubkey,name,status,relays,added_at,updated_at) VALUES(?1,?2,?3,?4,?5,?5)
+                 ON CONFLICT(pubkey) DO UPDATE SET name=CASE WHEN excluded.name='' THEN friends.name ELSE excluded.name END, status=excluded.status,
+                 relays=CASE WHEN excluded.relays='[]' THEN friends.relays ELSE excluded.relays END, updated_at=excluded.updated_at",
+                params![pubkey, name, status, serde_json::to_string(relays).unwrap_or_default(), now],
+            )?;
+            c.query_row("SELECT pubkey,name,status,relays,added_at,updated_at FROM friends WHERE pubkey=?1", params![pubkey], row_friend)
+        })
+    }
+
+    pub fn remove_friend(&self, pubkey: &str) -> anyhow::Result<bool> {
+        Ok(self.with(|c| c.execute("DELETE FROM friends WHERE pubkey=?1", params![pubkey]))? > 0)
+    }
 }
 
 fn row_device(r: &rusqlite::Row) -> rusqlite::Result<Device> {
-    Ok(Device { id: r.get(0)?, name: r.get(1)?, pubkey: r.get(2)?, paired_at: r.get(3)?, last_seen: r.get(4)?, last_manifest: r.get(5)?, last_upload: r.get(6)? })
+    Ok(Device { id: r.get(0)?, name: r.get(1)?, pubkey: r.get(2)?, paired_at: r.get(3)?, last_seen: r.get(4)?, last_manifest: r.get(5)?, last_upload: r.get(6)?, biokey: r.get(7)?, devhash: r.get(8)? })
+}
+
+fn row_friend(r: &rusqlite::Row) -> rusqlite::Result<Friend> {
+    let pubkey: String = r.get(0)?;
+    Ok(Friend {
+        npub: cued_proto::nip19::npub(&pubkey),
+        pubkey,
+        name: r.get(1)?,
+        status: r.get(2)?,
+        relays: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
+        added_at: r.get(4)?,
+        updated_at: r.get(5)?,
+    })
 }
 
 fn row_track(r: &rusqlite::Row) -> rusqlite::Result<Track> {
@@ -391,7 +464,7 @@ mod tests {
     fn manifest_and_status() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("t.db")).unwrap();
-        let d = db.add_device("0011223344556677", "Pixel", "", "h1").unwrap();
+        let d = db.add_device("0011223344556677", "Pixel", "", "h1", "", "").unwrap();
         assert_eq!(db.device_by_token_hash("h1").unwrap().unwrap().id, d.id);
         let missing = db.set_manifest(&d.id, &[entry("aa", "One"), entry("bb", "Two")]).unwrap();
         assert_eq!(missing, vec!["aa", "bb"]);
@@ -407,5 +480,14 @@ mod tests {
         assert_eq!(tracks[0].sha256, "aa");
         assert!(db.remove_device(&d.id).unwrap());
         assert!(db.devices().unwrap().is_empty());
+        // friends
+        let f = db.set_friend(&"ab".repeat(32), "Sam", "pending_out", &[]).unwrap();
+        assert_eq!(f.status, "pending_out");
+        assert!(f.npub.starts_with("npub1"));
+        let f = db.set_friend(&"ab".repeat(32), "", "friends", &["wss://x".into()]).unwrap();
+        assert_eq!((f.name.as_str(), f.status.as_str(), f.relays.len()), ("Sam", "friends", 1));
+        assert_eq!(db.friends().unwrap().len(), 1);
+        assert!(db.remove_friend(&"ab".repeat(32)).unwrap());
+        assert!(db.friend(&"ab".repeat(32)).unwrap().is_none());
     }
 }

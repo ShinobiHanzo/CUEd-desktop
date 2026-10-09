@@ -64,3 +64,58 @@ async fn ffprobe(path: &Path) -> Option<serde_json::Value> {
     }
     serde_json::from_slice(&out.stdout).ok()
 }
+
+
+/// The embedded picture as a JPEG/PNG file under `<data>/cache/covers/<sha>.jpg`, extracted once. None when the file has none.
+pub async fn cover_file(data_dir: &Path, sha: &str, audio: &Path) -> Option<std::path::PathBuf> {
+    let dir = data_dir.join("cache").join("covers");
+    let _ = tokio::fs::create_dir_all(&dir).await;
+    let out = dir.join(format!("{sha}.jpg"));
+    let none = dir.join(format!("{sha}.none"));
+    if tokio::fs::try_exists(&out).await.unwrap_or(false) {
+        return Some(out);
+    }
+    if tokio::fs::try_exists(&none).await.unwrap_or(false) {
+        return None;
+    }
+    let status = tokio::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-i"])
+        .arg(audio)
+        .args(["-an", "-map", "0:v:0", "-c:v", "copy", "-f", "image2", "-frames:v", "1"])
+        .arg(&out)
+        .output()
+        .await;
+    match status {
+        Ok(o) if o.status.success() && tokio::fs::metadata(&out).await.map(|m| m.len() > 0).unwrap_or(false) => Some(out),
+        _ => {
+            let _ = tokio::fs::remove_file(&out).await;
+            let _ = tokio::fs::write(&none, b"").await;
+            None
+        }
+    }
+}
+
+/// Lyrics: a `.lrc` sidecar next to the file, else an embedded `lyrics…` tag. `(text, synced)`.
+pub async fn lyrics(audio: &Path) -> Option<(String, bool)> {
+    let lrc = audio.with_extension("lrc");
+    if let Ok(t) = tokio::fs::read_to_string(&lrc).await {
+        if !t.trim().is_empty() {
+            return Some((t.clone(), is_synced(&t)));
+        }
+    }
+    let ff = ffprobe(audio).await?;
+    let tags = ff["format"]["tags"].as_object()?;
+    for (k, v) in tags {
+        let kl = k.to_ascii_lowercase();
+        if kl.starts_with("lyrics") || kl == "uslt" || kl == "unsyncedlyrics" || kl == "©lyr" {
+            if let Some(t) = v.as_str().filter(|t| !t.trim().is_empty()) {
+                return Some((t.to_string(), is_synced(t)));
+            }
+        }
+    }
+    None
+}
+
+fn is_synced(t: &str) -> bool {
+    t.lines().take(20).any(|l| l.trim_start().starts_with('[') && l.chars().nth(3) == Some(':'))
+}

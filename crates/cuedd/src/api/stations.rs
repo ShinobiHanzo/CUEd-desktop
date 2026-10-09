@@ -7,6 +7,7 @@ use cued_proto::{Link, StationLink};
 
 use super::{Admin, AnyUser, ApiError, ApiResult, App};
 use crate::db::Follow;
+use crate::state::UiEvent;
 
 #[derive(serde::Deserialize)]
 pub struct Reveal {
@@ -15,9 +16,9 @@ pub struct Reveal {
 }
 
 pub async fn identity(_a: Admin, State(s): State<App>, Query(q): Query<Reveal>) -> Json<serde_json::Value> {
-    let mut v = serde_json::json!({ "npub": s.identity.npub(), "pubkey": s.identity.pubkey_hex() });
+    let mut v = serde_json::json!({ "npub": s.identity().npub(), "pubkey": s.identity().pubkey_hex() });
     if q.reveal {
-        v["nsec"] = serde_json::json!(s.identity.nsec());
+        v["nsec"] = serde_json::json!(s.identity().nsec());
     }
     Json(v)
 }
@@ -44,7 +45,7 @@ pub async fn follow(_a: Admin, State(s): State<App>, Json(b): Json<FollowBody>) 
             _ => return Err(ApiError::bad("paste a cued://station link or an npub")),
         },
     };
-    if f.pubkey == s.identity.pubkey_hex() {
+    if f.pubkey == s.identity().pubkey_hex() {
         return Err(ApiError::bad("that is this desktop's own station"));
     }
     s.db.add_follow(&f)?;
@@ -78,6 +79,8 @@ pub async fn unfollow(_a: Admin, State(s): State<App>, Path(pubkey): Path<String
 
 pub async fn feed(_u: AnyUser, State(s): State<App>) -> Json<serde_json::Value> {
     let now = crate::db::now_ms();
+    let friends: std::collections::HashSet<String> = s.db.friends().unwrap_or_default().into_iter().filter(|f| f.status == "friends").map(|f| f.pubkey).collect();
+    let listening = s.listen.listening();
     let entries: Vec<serde_json::Value> = s
         .stations
         .feed()
@@ -86,11 +89,52 @@ pub async fn feed(_u: AnyUser, State(s): State<App>) -> Json<serde_json::Value> 
             let pos = e.state.expected_position_ms(now);
             let mut v = serde_json::to_value(&e).unwrap_or_default();
             v["expectedPositionMs"] = serde_json::json!(pos);
-            v["mine"] = serde_json::json!(e.pubkey == s.identity.pubkey_hex());
+            v["mine"] = serde_json::json!(e.pubkey == s.identity().pubkey_hex());
+            v["friend"] = serde_json::json!(friends.contains(&e.pubkey));
+            v["canListen"] = serde_json::json!(e.pubkey != s.identity().pubkey_hex() && e.state.now.as_ref().map(|n| n.stream.is_some() || n.link.is_some() || true).unwrap_or(false));
+            v["listening"] = serde_json::json!(listening.as_deref() == Some(e.pubkey.as_str()));
             v
         })
         .collect();
-    Json(serde_json::json!({ "stations": entries, "upstream": s.stations.upstream_status(), "hosting": s.stations.hosting.load(std::sync::atomic::Ordering::Relaxed) }))
+    Json(serde_json::json!({ "stations": entries, "upstream": s.stations.upstream_status(), "hosting": s.stations.hosting.load(std::sync::atomic::Ordering::Relaxed), "relayEnabled": s.relay_enabled(), "listening": s.listen.status() }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct ListenBody {
+    pub pubkey: String,
+}
+
+pub async fn listen_status(_u: AnyUser, State(s): State<App>) -> Json<serde_json::Value> {
+    Json(s.listen.status())
+}
+
+pub async fn listen(_u: AnyUser, State(s): State<App>, Json(b): Json<ListenBody>) -> ApiResult<Json<serde_json::Value>> {
+    let pk = match cued_proto::nip19::parse(&b.pubkey) {
+        Some((_, hex)) => hex,
+        None => return Err(ApiError::bad("bad pubkey")),
+    };
+    if pk == s.identity().pubkey_hex() {
+        return Err(ApiError::bad("that is this desktop's own station"));
+    }
+    if !s.player.enabled() {
+        return Err(ApiError::bad("audio engine is off"));
+    }
+    let name = s.stations.feed().into_iter().find(|e| e.pubkey == pk).map(|e| e.name).or_else(|| s.db.friend(&pk).ok().flatten().map(|f| f.name)).unwrap_or_default();
+    if !s.db.follows()?.iter().any(|f| f.pubkey == pk) {
+        s.db.add_follow(&crate::db::Follow { pubkey: pk.clone(), name: name.clone(), relays: vec![], added_at: 0 })?;
+        s.stations.poke();
+    }
+    s.stations.hosting.store(false, std::sync::atomic::Ordering::Relaxed);
+    s.listen.start(&pk, &name);
+    s.emit(UiEvent::Listen);
+    Ok(Json(s.listen.status()))
+}
+
+pub async fn stop_listening(_u: AnyUser, State(s): State<App>) -> Json<serde_json::Value> {
+    s.listen.stop();
+    s.player.stop();
+    s.emit(UiEvent::Listen);
+    Json(s.listen.status())
 }
 
 #[derive(serde::Deserialize)]
@@ -116,11 +160,11 @@ pub async fn my_link(_a: Admin, State(s): State<App>) -> ApiResult<Json<serde_js
     let settings = s.settings();
     let mut relays = settings.upstream_relays.clone();
     relays.insert(0, s.relay_url());
-    let link = StationLink { pubkey: s.identity.pubkey_hex(), name: settings.station_name, relays: relays.into_iter().take(3).collect() };
+    let link = StationLink { pubkey: s.identity().pubkey_hex(), name: settings.station_name, relays: relays.into_iter().take(3).collect() };
     let text = link.encode();
-    Ok(Json(serde_json::json!({ "link": text, "npub": s.identity.npub(), "svg": super::pair::qr_svg(&text)? })))
+    Ok(Json(serde_json::json!({ "link": text, "npub": s.identity().npub(), "svg": super::pair::qr_svg(&text)? })))
 }
 
 pub async fn relay_stats(_u: AnyUser, State(s): State<App>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "url": s.relay_url(), "stats": s.relay.stats(), "upstream": s.stations.upstream_status() }))
+    Json(serde_json::json!({ "url": s.relay_url(), "enabled": s.relay_enabled(), "stats": s.relay.stats(), "upstream": s.stations.upstream_status() }))
 }

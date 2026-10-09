@@ -6,16 +6,22 @@
 //! that id, and the bech32 `npub`/`nsec` spelling of keys. The tests run the
 //! same BIP-340 vectors the phone runs.
 
+pub mod account;
+pub mod bio;
+pub mod friend;
 pub mod link;
 pub mod nip19;
 pub mod nostr;
 pub mod pair;
+pub mod seal;
 pub mod share;
 pub mod station;
 
+pub use account::{Block, Chain};
+pub use friend::FriendLink;
 pub use link::{decode_link, Link};
 pub use nostr::{Event, Identity, RelayMessage};
-pub use pair::{PairLink, PairRequest, PairResponse};
+pub use pair::{AccountBundle, PairLink, PairRequest, PairResponse, SealedAccount};
 pub use share::SharePayload;
 pub use station::{StationLink, StationState, StationTrack};
 
@@ -41,6 +47,10 @@ pub enum Error {
     Key(String),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("chain: {0}")]
+    Chain(String),
+    #[error("seal: {0}")]
+    Seal(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

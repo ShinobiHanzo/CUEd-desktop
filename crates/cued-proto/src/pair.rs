@@ -86,6 +86,19 @@ pub struct PairRequest {
     pub pubkey: String,
     pub nonce: String,
     pub proof: String,
+    /// `join` (take the desktop's account), `keep` (give the desktop mine) or `separate`.
+    #[serde(default = "crate::pair::default_account")]
+    pub account: String,
+    /// ECDSA P-256 public key (SEC1 hex) the phone only uses after a biometric unlock.
+    #[serde(default)]
+    pub biokey: String,
+    /// `sha256("cued-device|" + device + "|" + salt)`, the phone's device hash in the account chain.
+    #[serde(default)]
+    pub devhash: String,
+}
+
+pub(crate) fn default_account() -> String {
+    "separate".into()
 }
 
 pub(crate) fn default_version() -> u32 {
@@ -97,6 +110,21 @@ pub(crate) fn default_version() -> u32 {
 pub struct PairResponse {
     pub token: String,
     pub desktop: DesktopInfo,
+    /// Present for `account: "join"`: the desktop's account, sealed with the pairing secret (label `account`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<SealedAccount>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SealedAccount {
+    pub sealed: String,
+}
+
+/// What travels inside the seal: the secret key and the whole chain.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AccountBundle {
+    pub secret_hex: String,
+    pub chain: crate::account::Chain,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -121,7 +149,7 @@ impl PairRequest {
     pub fn build(link: &PairLink, name: &str, device: &str, pubkey: &str) -> Result<Self> {
         let nonce = hex::encode(rand::random::<[u8; 8]>());
         let proof = proof(&link.secret, device, name, &nonce)?;
-        Ok(Self { v: PAIR_VERSION, name: name.into(), device: device.into(), pubkey: pubkey.into(), nonce, proof })
+        Ok(Self { v: PAIR_VERSION, name: name.into(), device: device.into(), pubkey: pubkey.into(), nonce, proof, account: default_account(), biokey: String::new(), devhash: String::new() })
     }
 
     /// Constant-time check against the secret the desktop issued.

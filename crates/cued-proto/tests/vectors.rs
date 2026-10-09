@@ -121,3 +121,18 @@ fn link_dispatch() {
     assert!(matches!(decode_link(&format!("cued://pair?v=1&n=x&a=http%3A%2F%2F1.2.3.4%3A8770&s={}", "0f".repeat(16))), Ok(Link::Pair(_))));
     assert!(decode_link("https://example.com").is_err());
 }
+
+/// A chain produced by the Python implementation (`python/cued_companion/account.py`) with
+/// `data` keys in insertion order: the desktop must validate it byte for byte.
+#[test]
+fn python_chain_validates() {
+    let chain: cued_proto::Chain = serde_json::from_str(include_str!("python-chain.json")).unwrap();
+    chain.validate().unwrap();
+    assert_eq!(chain.height(), 3);
+    assert_eq!(chain.name(), "Idris");
+    assert_eq!(chain.devices()[0]["name"], "Pixel 8");
+    assert_eq!(chain.settings()["theme"]["accent"], "#ff8800");
+    // Re-serialising keeps the order, so a copy that went through the desktop still validates.
+    let again: cued_proto::Chain = serde_json::from_str(&serde_json::to_string(&chain).unwrap()).unwrap();
+    again.validate().unwrap();
+}

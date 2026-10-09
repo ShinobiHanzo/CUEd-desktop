@@ -128,7 +128,7 @@ async fn run(state: Arc<AppState>, shutdown: CancellationToken) {
                             let list: Vec<serde_json::Value> = jobs.as_array().cloned().or_else(|| jobs["jobs"].as_array().cloned()).unwrap_or_default();
                             for job in list {
                                 let id = job["id"].as_str().unwrap_or("").to_string();
-                                if id.is_empty() || job["status"].as_str() != Some("done") || imported_jobs.contains(&id) { continue; }
+                                if id.is_empty() || job["status"].as_str() != Some("done") || imported_jobs.contains(&id) || state.listen.is_temp_job(&id) { continue; }
                                 imported_jobs.insert(id.clone());
                                 let files: Vec<String> = job["files"].as_array().map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect()).unwrap_or_default();
                                 for name in files.iter().filter(|n| !n.to_ascii_lowercase().ends_with(".lrc") && !n.to_ascii_lowercase().ends_with(".txt")) {

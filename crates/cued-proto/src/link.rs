@@ -3,7 +3,7 @@
 
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 
-use crate::{pair::PairLink, share::SharePayload, station::StationLink, Error, Result};
+use crate::{friend::FriendLink, pair::PairLink, share::SharePayload, station::StationLink, Error, Result};
 
 /// `URLEncoder.encode(s, "UTF-8").replace("+", "%20")` on the phone keeps
 /// `-`, `_`, `.`, `*` and encodes everything else that is not alphanumeric.
@@ -46,6 +46,7 @@ pub enum Link {
     Share(SharePayload),
     Station(StationLink),
     Pair(PairLink),
+    Friend(FriendLink),
 }
 
 /// Recognises every CUEd link form, including the web share form.
@@ -56,6 +57,9 @@ pub fn decode_link(text: &str) -> Result<Link> {
     }
     if let Ok(s) = StationLink::decode(t) {
         return Ok(Link::Station(s));
+    }
+    if let Ok(f) = FriendLink::decode(t) {
+        return Ok(Link::Friend(f));
     }
     SharePayload::decode(t).map(Link::Share).map_err(|_| Error::NotALink("cued"))
 }

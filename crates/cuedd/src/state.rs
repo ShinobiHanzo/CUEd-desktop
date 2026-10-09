@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
+use crate::account::AccountStore;
 use crate::config::Settings;
 use crate::db::Db;
 use crate::player::Player;
@@ -47,6 +48,20 @@ pub struct ShareCap {
     pub expires: Instant,
 }
 
+/// A biometric challenge handed to a phone (`docs/protocol.md` §7).
+pub struct Challenge {
+    pub device: String,
+    pub issued: Instant,
+}
+
+/// Which tier a request was admitted at. Set by the policy middleware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    Admin,
+    Lan,
+    Remote,
+}
+
 /// Something the UI wants to hear about live.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -58,6 +73,10 @@ pub enum UiEvent {
     Station { pubkey: String },
     Relay { connections: usize },
     Companion { job: String, status: String, message: String },
+    Friends,
+    Shared,
+    Account,
+    Listen,
     #[allow(dead_code)]
     Notice { text: String },
 }
@@ -68,11 +87,17 @@ pub struct AppState {
     pub db: Db,
     pub store: Store,
     pub settings: Mutex<Settings>,
-    pub identity: Identity,
+    pub account: AccountStore,
     pub relay: Arc<cued_relay::Relay>,
     pub player: Player,
     pub pending_pairs: Mutex<Vec<PendingPair>>,
+    /// Secrets of phones paired in the last 10 minutes, so a `keep` import can be opened.
+    pub recent_pair_secrets: Mutex<HashMap<String, (String, Instant)>>,
     pub share_caps: Mutex<HashMap<String, ShareCap>>,
+    pub challenges: Mutex<HashMap<String, Challenge>>,
+    /// Verified assertions: `<challenge>.<sig>` → (device, verified at).
+    pub assertions: Mutex<HashMap<String, (String, Instant)>>,
+    pub listen: crate::listen::ListenShared,
     pub events: broadcast::Sender<UiEvent>,
     pub http: reqwest::Client,
     pub funnel_status: Arc<cued_funnel::FunnelStatus>,
@@ -94,8 +119,8 @@ impl AppState {
         settings.save(&settings_path)?;
         let db = Db::open(&o.data_dir.join("cued.db"))?;
         let store = Store::new(&o.data_dir)?;
-        let identity = crate::identity::load_or_create(&o.data_dir.join("identity.json"))?;
-        info!("station identity {}", identity.npub());
+        let account = AccountStore::open(&o.data_dir, &settings.name).context("opening the account")?;
+        info!("account {} ({}), chain height {}", account.identity().npub(), account.chain().name(), account.chain().height());
         let relay = cued_relay::Relay::open(Some(&o.data_dir.join("relay.db"))).context("opening relay store")?;
         let player = Player::new(!o.no_audio, settings.crossfade_seconds, settings.crossfade_curve);
         let (events, _) = broadcast::channel(256);
@@ -118,11 +143,15 @@ impl AppState {
             db,
             store,
             settings: Mutex::new(settings),
-            identity,
+            account,
             relay,
             player,
             pending_pairs: Mutex::new(Vec::new()),
+            recent_pair_secrets: Mutex::new(HashMap::new()),
             share_caps: Mutex::new(HashMap::new()),
+            challenges: Mutex::new(HashMap::new()),
+            assertions: Mutex::new(HashMap::new()),
+            listen: Default::default(),
             events,
             http: reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(600)).build()?,
             funnel_status: Arc::new(cued_funnel::FunnelStatus::default()),
@@ -137,6 +166,20 @@ impl AppState {
 
     pub async fn close(&self) {
         self.player.stop();
+    }
+
+    /// The account's key pair (the thing that signs stations, friend events and chain blocks).
+    pub fn identity(&self) -> Identity {
+        self.account.identity()
+    }
+
+    pub fn relay_enabled(&self) -> bool {
+        self.account.relay_enabled()
+    }
+
+    /// Base URL other people's devices should use for capability links: the funnel when there is one, else the LAN.
+    pub fn public_base(&self) -> String {
+        self.funnel_url().unwrap_or_else(|| self.lan_urls().into_iter().next().unwrap_or_else(|| format!("http://127.0.0.1:{}", self.port)))
     }
 
     pub fn settings(&self) -> Settings {
@@ -183,21 +226,60 @@ impl AppState {
             funnel: self.funnel_url(),
             cert_sha256: self.tls_fingerprint.clone(),
             secret,
-            pubkey: Some(self.identity.pubkey_hex()),
+            pubkey: Some(self.identity().pubkey_hex()),
             relay: Some(self.relay_url()),
         }
     }
 
-    /// Finds the pending secret that signs `req` and consumes it.
-    pub fn take_pair_secret(&self, req: &cued_proto::PairRequest) -> bool {
+    /// Finds the pending secret that signs `req`, consumes it and returns it.
+    pub fn take_pair_secret(&self, req: &cued_proto::PairRequest) -> Option<String> {
         let mut p = self.pending_pairs.lock().unwrap_or_else(|p| p.into_inner());
         p.retain(|x| x.created.elapsed() < PAIR_TTL);
-        if let Some(i) = p.iter().position(|x| req.verify(&x.secret)) {
-            p.remove(i);
-            true
-        } else {
-            false
+        let i = p.iter().position(|x| req.verify(&x.secret))?;
+        let secret = p.remove(i).secret;
+        let mut r = self.recent_pair_secrets.lock().unwrap_or_else(|p| p.into_inner());
+        r.retain(|_, (_, t)| t.elapsed() < PAIR_TTL);
+        r.insert(req.device.clone(), (secret.clone(), Instant::now()));
+        Some(secret)
+    }
+
+    pub fn recent_pair_secret(&self, device: &str) -> Option<String> {
+        let mut r = self.recent_pair_secrets.lock().unwrap_or_else(|p| p.into_inner());
+        r.retain(|_, (_, t)| t.elapsed() < PAIR_TTL);
+        r.get(device).map(|(s, _)| s.clone())
+    }
+
+    pub fn new_challenge(&self, device: &str) -> String {
+        let c = cued_proto::bio::new_challenge();
+        let mut m = self.challenges.lock().unwrap_or_else(|p| p.into_inner());
+        m.retain(|_, ch| ch.issued.elapsed() < ASSERTION_TTL);
+        m.insert(c.clone(), Challenge { device: device.into(), issued: Instant::now() });
+        c
+    }
+
+    /// `true` when `assertion` (`<challenge>.<sig>`) is a live biometric assertion by `device`.
+    pub fn check_assertion(&self, device: &crate::db::Device, assertion: &str) -> bool {
+        if device.biokey.is_empty() {
+            return false;
         }
+        {
+            let mut a = self.assertions.lock().unwrap_or_else(|p| p.into_inner());
+            a.retain(|_, (_, t)| t.elapsed() < ASSERTION_TTL);
+            if let Some((d, _)) = a.get(assertion) {
+                return d == &device.id;
+            }
+        }
+        let Some((challenge, sig)) = assertion.split_once('.') else { return false };
+        let live = {
+            let mut m = self.challenges.lock().unwrap_or_else(|p| p.into_inner());
+            m.retain(|_, ch| ch.issued.elapsed() < ASSERTION_TTL);
+            m.get(challenge).map(|ch| ch.device == device.id).unwrap_or(false)
+        };
+        if !live || !cued_proto::bio::verify(&device.biokey, &device.id, challenge, sig) {
+            return false;
+        }
+        self.assertions.lock().unwrap_or_else(|p| p.into_inner()).insert(assertion.to_string(), (device.id.clone(), Instant::now()));
+        true
     }
 
     pub fn pending_pair_count(&self) -> usize {
@@ -207,10 +289,14 @@ impl AppState {
     }
 
     pub fn new_share_cap(&self, sha256: &str) -> String {
+        self.new_share_cap_for(sha256, SHARE_TTL)
+    }
+
+    pub fn new_share_cap_for(&self, sha256: &str, ttl: Duration) -> String {
         let cap = hex::encode(rand::random::<[u8; 12]>());
         let mut m = self.share_caps.lock().unwrap_or_else(|p| p.into_inner());
         m.retain(|_, c| c.expires > Instant::now());
-        m.insert(cap.clone(), ShareCap { sha256: sha256.into(), expires: Instant::now() + SHARE_TTL });
+        m.insert(cap.clone(), ShareCap { sha256: sha256.into(), expires: Instant::now() + ttl });
         cap
     }
 
@@ -222,6 +308,8 @@ impl AppState {
 
 const PAIR_TTL: Duration = Duration::from_secs(600);
 const SHARE_TTL: Duration = Duration::from_secs(1800);
+/// Challenges and the assertions signed over them are good for this long.
+const ASSERTION_TTL: Duration = Duration::from_secs(600);
 
 pub fn token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -234,4 +322,12 @@ pub fn new_token() -> String {
 
 pub fn is_loopback(ip: IpAddr) -> bool {
     ip.is_loopback()
+}
+
+/// "Same LAN directly": loopback or an RFC 1918 address.
+pub fn is_lan(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(a) => a.is_loopback() || a.is_private() || a.is_link_local(),
+        IpAddr::V6(a) => a.is_loopback() || a.to_ipv4_mapped().map(|v4| v4.is_private() || v4.is_loopback()).unwrap_or(false) || (a.segments()[0] & 0xfe00) == 0xfc00 || (a.segments()[0] & 0xffc0) == 0xfe80,
+    }
 }

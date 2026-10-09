@@ -77,7 +77,7 @@ pub fn spawn(state: Arc<AppState>, shutdown: CancellationToken) {
             feed_update(&state, &ev, "local");
         }
     }
-    if let Some(ev) = state.relay.latest_by_author(station::KIND, &state.identity.pubkey_hex(), Some(station::D_TAG)) {
+    if let Some(ev) = state.relay.latest_by_author(station::KIND, &state.identity().pubkey_hex(), Some(station::D_TAG)) {
         feed_update(&state, &ev, "local");
     }
 
@@ -96,7 +96,8 @@ pub fn spawn(state: Arc<AppState>, shutdown: CancellationToken) {
                     ev = rx.recv() => match ev {
                         Ok(ev) => {
                             feed_update(&state, &ev, "local");
-                            if state.settings().mirror_out && is_ours(&state, &ev.pubkey) {
+                            crate::friends::on_event(&state, &ev);
+                            if state.relay_enabled() && state.settings().mirror_out && is_ours(&state, &ev.pubkey) {
                                 let _ = out_tx.send(ev);
                             }
                         }
@@ -112,12 +113,13 @@ pub fn spawn(state: Arc<AppState>, shutdown: CancellationToken) {
     tokio::spawn(upstream_loop(state.clone(), out_rx, shutdown.clone()));
     // Host.
     tokio::spawn(host_loop(state.clone(), shutdown.clone()));
+    crate::listen::spawn(state.clone(), shutdown.clone());
     crate::player::spawn_ticker(state, shutdown);
 }
 
 /// Events worth re-publishing upstream: the desktop's own and its paired phones'.
 fn is_ours(state: &AppState, pubkey: &str) -> bool {
-    pubkey == state.identity.pubkey_hex() || state.db.devices().unwrap_or_default().iter().any(|d| d.pubkey == pubkey)
+    pubkey == state.identity().pubkey_hex() || state.db.devices().unwrap_or_default().iter().any(|d| d.pubkey == pubkey)
 }
 
 async fn upstream_loop(state: Arc<AppState>, mut out_rx: mpsc::UnboundedReceiver<Event>, shutdown: CancellationToken) {
@@ -125,7 +127,8 @@ async fn upstream_loop(state: Arc<AppState>, mut out_rx: mpsc::UnboundedReceiver
     let mut backlog: Vec<Event> = Vec::new();
     loop {
         // (Re)build the set of relay tasks from the settings.
-        let wanted: Vec<String> = if state.settings().mirror_in || state.settings().mirror_out { state.settings().upstream_relays.clone() } else { vec![] };
+        // The desktop relay is a switch shared by every device of the account; off means no upstream traffic either.
+        let wanted: Vec<String> = if state.relay_enabled() && (state.settings().mirror_in || state.settings().mirror_out) { state.settings().upstream_relays.clone() } else { vec![] };
         children.retain(|url, (tok, _)| {
             if wanted.contains(url) {
                 true
@@ -177,7 +180,7 @@ async fn relay_task(state: Arc<AppState>, url: String, mut out: mpsc::UnboundedR
                 let (mut tx, mut rx) = ws.split();
                 // Subscribe to everyone we follow, plus the desktop's own station and the phones' (to see our mirror land).
                 let mut authors: Vec<String> = state.db.follows().unwrap_or_default().into_iter().map(|f| f.pubkey).collect();
-                authors.push(state.identity.pubkey_hex());
+                authors.push(state.identity().pubkey_hex());
                 for d in state.db.devices().unwrap_or_default() {
                     if !d.pubkey.is_empty() {
                         authors.push(d.pubkey);
@@ -186,11 +189,12 @@ async fn relay_task(state: Arc<AppState>, url: String, mut out: mpsc::UnboundedR
                 authors.sort();
                 authors.dedup();
                 if state.settings().mirror_in && !authors.is_empty() {
-                    let _ = tx.send(tokio_tungstenite::tungstenite::Message::Text(nostr::req_message("cued-stations", &[nostr::station_filter(&authors, None)]))).await;
+                    let me = state.identity().pubkey_hex();
+                    let _ = tx.send(tokio_tungstenite::tungstenite::Message::Text(nostr::req_message("cued-stations", &[nostr::station_filter(&authors, None), cued_proto::friend::filter(&me, None)]))).await;
                 }
                 // Push the newest state of ours so a relay that was down catches up.
                 if state.settings().mirror_out {
-                    if let Some(ev) = state.relay.latest_by_author(station::KIND, &state.identity.pubkey_hex(), Some(station::D_TAG)) {
+                    if let Some(ev) = state.relay.latest_by_author(station::KIND, &state.identity().pubkey_hex(), Some(station::D_TAG)) {
                         let _ = tx.send(tokio_tungstenite::tungstenite::Message::Text(nostr::event_message(&ev))).await;
                     }
                 }
@@ -207,9 +211,10 @@ async fn relay_task(state: Arc<AppState>, url: String, mut out: mpsc::UnboundedR
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
                                 match nostr::parse_relay_message(&text) {
                                     RelayMessage::Event { event, .. } => {
-                                        if event.verify() && authors.contains(&event.pubkey) {
+                                        if event.verify() && (authors.contains(&event.pubkey) || event.kind == cued_proto::friend::FRIEND_KIND) {
                                             if state.settings().mirror_in { let _ = state.relay.publish(&event); }
                                             feed_update(&state, &event, &url);
+                                            crate::friends::on_event(&state, &event);
                                         }
                                     }
                                     RelayMessage::Ok { accepted: false, event_id, message } => warn!("relay {url} rejected {}: {message}", &event_id[..8.min(event_id.len())]),
@@ -240,8 +245,17 @@ async fn relay_task(state: Arc<AppState>, url: String, mut out: mpsc::UnboundedR
     }
 }
 
-fn to_station_track(q: &crate::player::QueueItem) -> StationTrack {
-    StationTrack { title: q.title.clone(), artist: q.artist.clone(), album: q.album.clone(), duration_ms: q.duration_ms, link: q.link.clone().filter(|l| l.starts_with("http")), cover: None, key: q.sha256.clone() }
+/// A station entry for `q`; with friend streaming on, capability URLs for the audio, cover and lyrics ride along.
+fn to_station_track(state: &AppState, q: &crate::player::QueueItem) -> StationTrack {
+    let mut t = StationTrack { title: q.title.clone(), artist: q.artist.clone(), album: q.album.clone(), duration_ms: q.duration_ms, link: q.link.clone().filter(|l| l.starts_with("http")), cover: None, key: q.sha256.clone(), stream: None, lyrics: None };
+    if state.account.friend_streaming() && !q.sha256.is_empty() {
+        let cap = state.new_share_cap_for(&q.sha256, Duration::from_secs(2 * 3600));
+        let base = state.public_base();
+        t.stream = Some(format!("{base}/share/{}/{cap}", q.sha256));
+        t.cover = Some(format!("{base}/share/{}/{cap}/cover", q.sha256));
+        t.lyrics = Some(format!("{base}/share/{}/{cap}/lyrics", q.sha256));
+    }
+    t
 }
 
 /// Publishes the desktop's own station state while hosting: on every player change and every 30 s.
@@ -258,7 +272,7 @@ async fn host_loop(state: Arc<AppState>, shutdown: CancellationToken) {
             if was_hosting {
                 seq += 1;
                 let st = StationState { name: state.settings().station_name, status: station::STATUS_OFF.into(), seq, ..Default::default() };
-                let ev = state.identity.sign_now(station::KIND, station::tags(), st.encode());
+                let ev = state.identity().sign_now(station::KIND, station::tags(), st.encode());
                 let _ = state.relay.publish(&ev);
                 was_hosting = false;
             }
@@ -279,13 +293,13 @@ async fn host_loop(state: Arc<AppState>, shutdown: CancellationToken) {
             v: 1,
             name: state.settings().station_name,
             status: if current.is_none() { station::STATUS_PAUSED.into() } else if playing { station::STATUS_ON_AIR.into() } else { station::STATUS_PAUSED.into() },
-            now: current.as_ref().map(to_station_track),
+            now: current.as_ref().map(|c| to_station_track(&state, c)),
             started_at: now_ms - pos_ms,
             position_ms: pos_ms,
-            next: queue.iter().take(3).map(to_station_track).collect(),
+            next: queue.iter().take(3).map(|q| to_station_track(&state, q)).collect(),
             seq,
         };
-        let ev = state.identity.sign_now(station::KIND, station::tags(), st.encode());
+        let ev = state.identity().sign_now(station::KIND, station::tags(), st.encode());
         match state.relay.publish(&ev) {
             cued_relay::Accept::Rejected(r) => warn!("own station event rejected: {r}"),
             _ => debug!("station published seq={seq} {}", st.status),

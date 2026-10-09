@@ -26,9 +26,11 @@ Three languages, each where it earns its place:
 
 ## What it looks like
 
-| Link a phone | Library |
+| Link a phone | Library, mini player expanded with synced lyrics |
 |---|---|
-| ![pairing QR and linked phones](docs/screenshots/link.png) | ![library with play, queue, BPM and send-to-phone](docs/screenshots/library.png) |
+| ![pairing QR and linked phones](docs/screenshots/link.png) | ![library with the mini player showing lyrics](docs/screenshots/mini-expanded.png) |
+| **Friends** | **Theme colours** |
+| ![friend code, requests, friends](docs/screenshots/friends.png) | ![theme presets and live colour pickers](docs/screenshots/settings-theme.png) |
 | **Stations** | **Relay & funnel** |
 | ![following, feed and the desktop's own station](docs/screenshots/stations.png) | ![embedded relay, upstream relays, funnel](docs/screenshots/relay.png) |
 
@@ -89,9 +91,27 @@ cd python && python3 -m pytest -q                    # Python
 cued-phone-sim pair "<link from the UI>" && cued-phone-sim sync ~/Music   # end to end, no Android needed
 ```
 
+## Who may do what
+
+Three tiers, enforced before any handler runs (`docs/protocol.md` §7): the UI on localhost is
+admin; a paired phone on a private address writes with its token; from the funnel the desktop is
+**read-only** and each read needs a biometric assertion the phone signs with a Keystore key it
+cannot use without a fingerprint or face. The desktop relay is **off by default** and the switch
+syncs to every device of the account.
+
+## Accounts, friends, listening in
+
+An account is one secp256k1 key carried on a small signed chain, so you can scan the same
+pairing code on another computer and choose to join, keep or separate (`docs/protocol.md` §8).
+Friends are public keys exchanged over `cued://friend` QR or NFC links, or carried inside a share
+link with the "send a friend request" toggle (§9). A friend's station is metadata only, current
+track plus the next three; with *friend streaming* on, listeners pull temporary copies from the
+host's desktop and stay within a few seconds, keeping thumbnails, lyrics and metadata for 48
+hours (§10). Theme colours live in the account chain too, so your phones match the desktop.
+
 ## Status
 
-First cut. Everything above runs and is tested on Linux; the UI is a web page served by the daemon,
+Second cut (0.2.1). Everything above runs and is tested on Linux; the UI is a web page served by the daemon,
 which is what makes it work on an old laptop or a Pi next to the router. A native window (webview)
 and a tray icon are the obvious next step. The phone app still has to learn the `cued://pair` link
 and the sync calls (`docs/protocol.md` §2–3 is the spec; the phone repo's `docs/desktop.md` tracks

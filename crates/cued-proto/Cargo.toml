@@ -17,3 +17,5 @@ k256 = { workspace = true }
 bech32 = { workspace = true }
 percent-encoding = { workspace = true }
 thiserror = { workspace = true }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+base64 = "0.22"

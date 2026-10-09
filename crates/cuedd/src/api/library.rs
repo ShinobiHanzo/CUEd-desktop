@@ -41,8 +41,15 @@ pub async fn stream(_u: AnyUser, State(s): State<App>, Path(sha): Path<String>, 
     super::range_file(std::path::Path::new(&t.path), &t.mime, headers.get(header::RANGE), None).await
 }
 
+#[derive(serde::Deserialize, Default)]
+pub struct ShareBody {
+    /// "Send a friend request with it": adds this account's key and name to the link.
+    #[serde(default)]
+    pub friend: bool,
+}
+
 /// `POST /api/share/{sha}`: a `cued://share` link the phone's Receive screen pulls from, no pairing needed.
-pub async fn share(_a: Admin, State(s): State<App>, Path(sha): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn share(_a: Admin, State(s): State<App>, Path(sha): Path<String>, body: Option<Json<ShareBody>>) -> ApiResult<Json<serde_json::Value>> {
     let sha = sha.to_ascii_lowercase();
     let t = s.db.track(&sha)?.ok_or_else(|| ApiError::not_found("no such track"))?;
     let cap = s.new_share_cap(&sha);
@@ -52,6 +59,10 @@ pub async fn share(_a: Admin, State(s): State<App>, Path(sha): Path<String>) -> 
     p.file_url = Some(format!("{base}/share/{sha}/{cap}"));
     p.genres = t.genres.clone();
     p.bpm = t.bpm.map(|b| b as f32);
+    if body.map(|b| b.friend).unwrap_or(false) {
+        p.friend_pubkey = Some(s.identity().pubkey_hex());
+        p.friend_name = Some(s.account.chain().name());
+    }
     let link = p.encode();
     Ok(Json(serde_json::json!({ "link": link, "web": p.encode_web(), "svg": super::pair::qr_svg(&link)?, "expiresInSec": 1800 })))
 }
@@ -67,6 +78,46 @@ pub async fn share_download(State(s): State<App>, Path((sha, cap)): Path<(String
     super::range_file(std::path::Path::new(&t.path), &t.mime, headers.get(header::RANGE), Some(&name)).await
 }
 
+pub async fn share_cover(State(s): State<App>, Path((sha, cap)): Path<(String, String)>) -> ApiResult<Response> {
+    let sha = sha.to_ascii_lowercase();
+    if !s.check_share_cap(&sha, &cap) {
+        return Err(ApiError::forbidden("share link expired"));
+    }
+    cover_response(&s, &sha).await
+}
+
+pub async fn share_lyrics(State(s): State<App>, Path((sha, cap)): Path<(String, String)>) -> ApiResult<Json<serde_json::Value>> {
+    let sha = sha.to_ascii_lowercase();
+    if !s.check_share_cap(&sha, &cap) {
+        return Err(ApiError::forbidden("share link expired"));
+    }
+    lyrics_json(&s, &sha).await
+}
+
+/// `GET /api/track/{sha}/cover`: the embedded picture, extracted once with ffmpeg and cached.
+pub async fn cover(_u: AnyUser, State(s): State<App>, Path(sha): Path<String>) -> ApiResult<Response> {
+    cover_response(&s, &sha.to_ascii_lowercase()).await
+}
+
+async fn cover_response(s: &App, sha: &str) -> ApiResult<Response> {
+    let t = s.db.track(sha)?.ok_or_else(|| ApiError::not_found("no such track"))?;
+    let path = crate::probe::cover_file(&s.data_dir, sha, std::path::Path::new(&t.path)).await.ok_or_else(|| ApiError::not_found("no cover in this file"))?;
+    let mut r = super::range_file(&path, "image/jpeg", None, None).await?;
+    r.headers_mut().insert(header::CACHE_CONTROL, "max-age=86400".parse().unwrap());
+    Ok(r)
+}
+
+/// `GET /api/track/{sha}/lyrics`: `.lrc` sidecar, else the embedded lyrics tag.
+pub async fn lyrics(_u: AnyUser, State(s): State<App>, Path(sha): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+    lyrics_json(&s, &sha.to_ascii_lowercase()).await
+}
+
+async fn lyrics_json(s: &App, sha: &str) -> ApiResult<Json<serde_json::Value>> {
+    let t = s.db.track(sha)?.ok_or_else(|| ApiError::not_found("no such track"))?;
+    let (text, synced) = crate::probe::lyrics(std::path::Path::new(&t.path)).await.ok_or_else(|| ApiError::not_found("no lyrics for this track"))?;
+    Ok(Json(serde_json::json!({ "text": text, "synced": synced })))
+}
+
 #[derive(serde::Deserialize)]
 pub struct ReceiveBody {
     pub text: String,
@@ -75,6 +126,11 @@ pub struct ReceiveBody {
 /// `POST /api/receive {"text": "cued://share?…"}`: pull a track a phone is sharing right now.
 pub async fn receive(_a: Admin, State(s): State<App>, Json(b): Json<ReceiveBody>) -> ApiResult<Json<serde_json::Value>> {
     let payload = SharePayload::decode(&b.text).map_err(|e| ApiError::bad(format!("not a share link: {e}")))?;
+    // "Send a friend request with it": the sender's key rides in the link.
+    let friend = match (&payload.friend_pubkey, &payload.friend_name) {
+        (Some(pk), name) if pk != &s.identity().pubkey_hex() => crate::friends::request(&s, pk, name.as_deref().unwrap_or(""), &[]).ok(),
+        _ => None,
+    };
     let Some(file_url) = payload.file_url.clone() else {
         return Ok(Json(serde_json::json!({ "status": "no file in this share", "payload": payload, "link": payload.link })));
     };
@@ -107,7 +163,7 @@ pub async fn receive(_a: Admin, State(s): State<App>, Json(b): Json<ReceiveBody>
         }
     }
     let track = import_file(&s, tmp, Some((payload.title.clone(), payload.artist.clone(), album)), genres, payload.bpm.map(|b| b as f64), link, "receive").await?;
-    Ok(Json(serde_json::json!({ "status": "added", "track": track })))
+    Ok(Json(serde_json::json!({ "status": "added", "track": track, "friend": friend })))
 }
 
 #[derive(serde::Deserialize)]
@@ -132,7 +188,14 @@ pub async fn import(_a: Admin, State(s): State<App>, Json(b): Json<ImportBody>) 
             continue;
         }
         match import_file(&s, tmp, None, vec![], None, None, "import").await {
-            Ok(_) => added += 1,
+            Ok(t) => {
+                added += 1;
+                // A `.lrc` sidecar travels with its track.
+                let lrc = f.with_extension("lrc");
+                if lrc.is_file() {
+                    let _ = tokio::fs::copy(&lrc, std::path::Path::new(&t.path).with_extension("lrc")).await;
+                }
+            }
             Err(_) => skipped += 1,
         }
     }

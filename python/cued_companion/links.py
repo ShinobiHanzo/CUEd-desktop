@@ -1,9 +1,9 @@
 """
-``cued://share``, ``cued://station`` and ``cued://pair`` links.
+``cued://share``, ``cued://station``, ``cued://pair`` and ``cued://friend`` links.
 
 A faithful port of the phone's codecs (``core/.../share/SharePayload.kt`` and
 ``core/.../station/Station.kt``) plus the pairing link from
-``docs/protocol.md`` §2. The percent-encoding is Java's ``URLEncoder`` with
+``docs/protocol.md`` §2 and the friend link from §9. The percent-encoding is Java's ``URLEncoder`` with
 ``+`` turned into ``%20``: alphanumerics and ``- _ . *`` pass through,
 everything else (including ``~`` and ``/``) is ``%XX`` encoded, uppercase hex.
 Decoding accepts ``+`` as a space like Java's ``URLDecoder``.
@@ -90,6 +90,9 @@ class SharePayload:
     genres: List[str] = field(default_factory=list)
     bpm: Optional[float] = None
     version: int = SHARE_VERSION
+    # "Send a friend request with it" (protocol.md §9): the sender's account pubkey (64 hex) and name.
+    friend_pubkey: Optional[str] = None
+    friend_name: Optional[str] = None
 
     PREFIX = SCHEME + "://share?"
 
@@ -105,6 +108,10 @@ class SharePayload:
             q.append(("g", ",".join(self.genres)))
         if self.bpm is not None:
             q.append(("b", _fmt_bpm(self.bpm)))
+        if self.friend_pubkey is not None:
+            q.append(("fr", self.friend_pubkey))
+            if self.friend_name is not None:
+                q.append(("fn", self.friend_name))
         return build_query(q)
 
     def encode(self) -> str:
@@ -138,6 +145,12 @@ class SharePayload:
             version = int(q["v"]) if "v" in q else SHARE_VERSION
         except ValueError:
             version = SHARE_VERSION
+        # A malformed friend key is dropped, not an error: the track still arrives (share.rs does the same).
+        friend_pubkey = q.get("fr")
+        if friend_pubkey is not None:
+            friend_pubkey = friend_pubkey.lower()
+            if not is_hex(friend_pubkey, 64):
+                friend_pubkey = None
         return cls(
             title=title,
             artist=q.get("a", ""),
@@ -147,6 +160,8 @@ class SharePayload:
             genres=[g for g in q["g"].split(",") if g.strip()] if "g" in q else [],
             bpm=bpm,
             version=version,
+            friend_pubkey=friend_pubkey,
+            friend_name=q.get("fn"),
         )
 
 
@@ -185,6 +200,65 @@ class StationLink:
             return None
         relays = [r for r in q["r"].split(",") if r.strip()] if "r" in q else []
         return cls(p, q.get("n", ""), relays)
+
+
+# ---------------------------------------------------------------- friend
+
+
+@dataclass
+class FriendLink:
+    """``cued://friend?p=<pubkey hex>&n=<name>&r=<relay,relay>`` (protocol.md §9); same grammar as a station link."""
+
+    pubkey: str
+    name: str = ""
+    relays: List[str] = field(default_factory=list)
+
+    PREFIX = SCHEME + "://friend?"
+
+    def encode(self) -> str:
+        q: List[Tuple[str, str]] = [("p", self.pubkey)]
+        if self.name.strip():
+            q.append(("n", self.name))
+        if self.relays:
+            q.append(("r", ",".join(self.relays)))
+        return self.PREFIX + build_query(q)
+
+    @classmethod
+    def decode(cls, text: str) -> Optional["FriendLink"]:
+        t = text.strip()
+        if not t.startswith(cls.PREFIX):
+            return None
+        q = parse_query(t[len(cls.PREFIX) :])
+        p = q.get("p")
+        if p is None:
+            return None
+        p = p.lower()
+        if not is_hex(p, 64):
+            return None
+        relays = [r for r in q["r"].split(",") if r.strip()] if "r" in q else []
+        return cls(p, q.get("n", ""), relays)
+
+
+# Nostr kind and tag of a friend request / accept / remove event (parameterised-replaceable).
+FRIEND_KIND = 30778
+FRIEND_TAG = "cued-friend"
+
+
+def friend_d_tag(target_pubkey: str) -> str:
+    return "friend:" + target_pubkey
+
+
+def friend_tags(target_pubkey: str) -> List[List[str]]:
+    """Tags of a kind-30778 event aimed at ``target_pubkey``."""
+    return [["d", friend_d_tag(target_pubkey)], ["p", target_pubkey], ["t", FRIEND_TAG]]
+
+
+def friend_filter(me: str, since: Optional[int] = None) -> Dict:
+    """NIP-01 filter for friend events aimed at ``me``."""
+    f: Dict = {"kinds": [FRIEND_KIND], "#p": [me]}
+    if since is not None:
+        f["since"] = since
+    return f
 
 
 # ---------------------------------------------------------------- pair
@@ -264,11 +338,20 @@ def verify_pair_proof(secret_hex: str, device: str, name: str, nonce: str, proof
     return hmac.compare_digest(expected, proof.lower())
 
 
-def build_pair_request(link: PairLink, name: str, device: str, pubkey: str = "", nonce: Optional[str] = None) -> dict:
-    """The JSON body a phone POSTs to ``/api/pair`` after scanning ``link``."""
+ACCOUNT_MODES = ("join", "keep", "separate")
+
+
+def build_pair_request(link: PairLink, name: str, device: str, pubkey: str = "", nonce: Optional[str] = None,
+                       account: Optional[str] = None, biokey: Optional[str] = None, devhash: Optional[str] = None) -> dict:
+    """The JSON body a phone POSTs to ``/api/pair`` after scanning ``link``.
+
+    ``account`` (``join|keep|separate``), ``biokey`` (65-byte SEC1 P-256 public key, hex) and
+    ``devhash`` are the §7–§8 additions; they are written only when given, so an older
+    desktop sees exactly the §2 body.
+    """
     if nonce is None:
         nonce = os.urandom(8).hex()
-    return {
+    req = {
         "v": PAIR_VERSION,
         "name": name,
         "device": device,
@@ -276,6 +359,15 @@ def build_pair_request(link: PairLink, name: str, device: str, pubkey: str = "",
         "nonce": nonce,
         "proof": pair_proof(link.secret, device, name, nonce),
     }
+    if account is not None:
+        if account not in ACCOUNT_MODES:
+            raise ValueError("account must be one of %s" % ", ".join(ACCOUNT_MODES))
+        req["account"] = account
+    if biokey is not None:
+        req["biokey"] = biokey
+    if devhash is not None:
+        req["devhash"] = devhash
+    return req
 
 
 def new_pair_secret() -> str:
@@ -284,9 +376,9 @@ def new_pair_secret() -> str:
 
 # ---------------------------------------------------------------- any link
 
-Link = Union[SharePayload, StationLink, PairLink]
+Link = Union[SharePayload, StationLink, PairLink, FriendLink]
 
 
 def decode_link(text: str) -> Optional[Link]:
     """Recognises every CUEd link form, including the web share form."""
-    return PairLink.decode(text) or StationLink.decode(text) or SharePayload.decode(text)
+    return PairLink.decode(text) or StationLink.decode(text) or FriendLink.decode(text) or SharePayload.decode(text)

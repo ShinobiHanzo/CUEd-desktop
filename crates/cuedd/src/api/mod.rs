@@ -1,7 +1,9 @@
 //! HTTP surface: the phone API (`docs/protocol.md`), the UI's admin API, the
 //! relay websocket, the companion proxy and the static UI.
 
+pub mod account;
 pub mod companion;
+pub mod friends;
 pub mod library;
 pub mod pair;
 pub mod player;
@@ -13,7 +15,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Request, State};
-use axum::http::{header, request::Parts, HeaderValue, StatusCode};
+use axum::http::{header, request::Parts, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -21,7 +23,7 @@ use axum::{Extension, Json, Router};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::db::Device;
-use crate::state::{AppState, Origin};
+use crate::state::{AppState, Origin, Tier};
 
 pub type App = Arc<AppState>;
 
@@ -75,6 +77,10 @@ impl FromRequestParts<App> for Phone {
     async fn from_request_parts(parts: &mut Parts, state: &App) -> Result<Self, Self::Rejection> {
         let token = bearer(parts).ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "bearer token required".into()))?;
         let dev = state.db.device_by_token_hash(&crate::state::token_hash(&token))?.ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "unknown token".into()))?;
+        let tier = parts.extensions.get::<Tier>().copied().unwrap_or(Tier::Remote);
+        if tier == Tier::Remote && !matches!(parts.method, Method::GET | Method::HEAD) {
+            return Err(ApiError::forbidden("writes only on the LAN"));
+        }
         state.db.touch_device(&dev.id, false, false)?;
         Ok(Phone(dev))
     }
@@ -87,10 +93,8 @@ pub struct Admin;
 impl FromRequestParts<App> for Admin {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, _state: &App) -> Result<Self, Self::Rejection> {
-        let origin = parts.extensions.get::<Origin>().copied().unwrap_or(Origin::External);
-        let addr = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip());
-        match (origin, addr) {
-            (Origin::Lan, Some(ip)) if crate::state::is_loopback(ip) => Ok(Admin),
+        match parts.extensions.get::<Tier>().copied() {
+            Some(Tier::Admin) => Ok(Admin),
             _ => Err(ApiError::forbidden("this needs the desktop UI (localhost)")),
         }
     }
@@ -111,21 +115,83 @@ impl FromRequestParts<App> for AnyUser {
 }
 
 fn bearer(parts: &Parts) -> Option<String> {
-    parts
-        .headers
+    bearer_of(&parts.headers, parts.uri.query())
+}
+
+fn bearer_of(headers: &axum::http::HeaderMap, query: Option<&str>) -> Option<String> {
+    headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
         .map(|s| s.trim().to_string())
         .or_else(|| {
             // Phones streaming through a media player cannot always set headers: allow `?token=`.
-            parts.uri.query().and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=").map(str::to_string)))
+            query.and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=").map(str::to_string)))
         })
 }
 
-async fn tag_origin(Extension(origin): Extension<Origin>, mut req: Request, next: Next) -> Response {
+/// Read-only routes a phone may use away from home (`docs/protocol.md` §7).
+fn remote_readable(path: &str) -> bool {
+    const EXACT: [&str; 14] = [
+        "/api/me", "/api/library", "/api/sync/status", "/api/backup/snapshots", "/api/backup/blobs", "/api/stations/feed", "/api/stations/follows",
+        "/api/stations/listen", "/api/friends", "/api/friends/requests", "/api/friends/link", "/api/account", "/api/account/chain", "/api/settings/shared",
+    ];
+    const PREFIX: [&str; 2] = ["/api/track/", "/api/backup/blob/"];
+    EXACT.contains(&path) || PREFIX.iter().any(|p| path.starts_with(p)) || path == "/api/auth/challenge"
+}
+
+/// The three tiers: decides who a request is before any handler runs.
+async fn policy(State(s): State<App>, Extension(origin): Extension<Origin>, ConnectInfo(addr): ConnectInfo<SocketAddr>, mut req: Request, next: Next) -> Response {
+    let ip = addr.ip();
+    let tier = match origin {
+        Origin::Lan if crate::state::is_loopback(ip) => Tier::Admin,
+        Origin::Lan if crate::state::is_lan(ip) => Tier::Lan,
+        _ => Tier::Remote,
+    };
     req.extensions_mut().insert(origin);
-    next.run(req).await
+    req.extensions_mut().insert(tier);
+    if tier != Tier::Remote {
+        return next.run(req).await;
+    }
+    let path = req.uri().path().to_string();
+    let read_only = matches!(*req.method(), Method::GET | Method::HEAD);
+    // Capability links (`/share/<sha>/<cap>…`) are how friends stream: the capability is the credential.
+    if read_only && path.starts_with("/share/") {
+        return next.run(req).await;
+    }
+    if path == "/relay" {
+        if !s.relay_enabled() {
+            return ApiError::forbidden("the desktop relay is off").into_response();
+        }
+    } else if !(read_only && remote_readable(&path)) {
+        return ApiError::forbidden("writes only on the LAN").into_response();
+    }
+    let Some(token) = bearer_of(req.headers(), req.uri().query()) else {
+        return ApiError(StatusCode::UNAUTHORIZED, "bearer token required".into()).into_response();
+    };
+    let dev = match s.db.device_by_token_hash(&crate::state::token_hash(&token)) {
+        Ok(Some(d)) => d,
+        _ => return ApiError(StatusCode::UNAUTHORIZED, "unknown token".into()).into_response(),
+    };
+    if path == "/api/auth/challenge" {
+        return next.run(req).await;
+    }
+    let assertion = req
+        .headers()
+        .get("x-cued-assertion")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri().query().and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("assertion=").map(str::to_string))));
+    match assertion {
+        Some(a) if s.check_assertion(&dev, &a) => next.run(req).await,
+        _ if dev.biokey.is_empty() => ApiError::forbidden("this phone registered no biometric key; pair again on the LAN").into_response(),
+        _ => ApiError::forbidden("biometric assertion required: GET /api/auth/challenge, sign it, send X-Cued-Assertion").into_response(),
+    }
+}
+
+/// `GET /api/auth/challenge`: a nonce for the phone's biometric key to sign.
+async fn challenge(Phone(dev): Phone, State(s): State<App>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "challenge": s.new_challenge(&dev.id), "expiresInSec": 120, "hasBiokey": !dev.biokey.is_empty() }))
 }
 
 pub fn router(state: App, origin: Origin) -> Router {
@@ -139,6 +205,22 @@ pub fn router(state: App, origin: Origin) -> Router {
         .route("/me", get(pair::me))
         .route("/status", get(status))
         .route("/settings", get(settings).put(put_settings))
+        .route("/settings/shared", get(account::shared).put(account::put_shared))
+        .route("/auth/challenge", get(challenge))
+        // account
+        .route("/account", get(account::summary))
+        .route("/account/chain", get(account::chain).post(account::merge_chain))
+        .route("/account/import", post(account::import))
+        .route("/account/export", get(account::export))
+        .route("/account/profile", post(account::profile))
+        .route("/account/unbind", post(account::unbind))
+        .route("/account/new", post(account::renew))
+        // friends
+        .route("/friends", get(friends::list).post(friends::add))
+        .route("/friends/requests", get(friends::requests))
+        .route("/friends/link", get(friends::my_link))
+        .route("/friends/:pubkey", delete(friends::remove))
+        .route("/friends/:pubkey/accept", post(friends::accept))
         // sync / backup
         .route("/sync/manifest", post(sync::manifest))
         .route("/sync/track/:sha", put(sync::upload).head(sync::have))
@@ -153,6 +235,8 @@ pub fn router(state: App, origin: Origin) -> Router {
         .route("/library/analyse/:sha", post(library::analyse))
         .route("/track/:sha", get(library::stream))
         .route("/track/:sha/meta", get(library::meta))
+        .route("/track/:sha/cover", get(library::cover))
+        .route("/track/:sha/lyrics", get(library::lyrics))
         .route("/share/:sha", post(library::share))
         .route("/receive", post(library::receive))
         .route("/qr", get(library::qr))
@@ -174,6 +258,7 @@ pub fn router(state: App, origin: Origin) -> Router {
         .route("/stations/feed", get(stations::feed))
         .route("/stations/host", get(stations::host_status).post(stations::host))
         .route("/stations/link", get(stations::my_link))
+        .route("/stations/listen", get(stations::listen_status).post(stations::listen).delete(stations::stop_listening))
         .route("/relay/stats", get(stations::relay_stats))
         .route("/funnel", get(funnel))
         .layer(DefaultBodyLimit::max(4 << 30));
@@ -181,6 +266,8 @@ pub fn router(state: App, origin: Origin) -> Router {
     Router::new()
         .nest("/api", api)
         .route("/share/:sha/:cap", get(library::share_download))
+        .route("/share/:sha/:cap/cover", get(library::share_cover))
+        .route("/share/:sha/:cap/lyrics", get(library::share_lyrics))
         .route("/relay", get(crate::relay_ws::handler))
         .route("/ws/events", get(player::events_ws))
         // companion API at the root, exactly where the phone's Companion backend expects it
@@ -189,7 +276,7 @@ pub fn router(state: App, origin: Origin) -> Router {
         .route("/jobs/:id", get(companion::job).delete(companion::delete_job))
         .route("/files/:name", get(companion::file))
         .fallback(crate::ui::serve)
-        .layer(middleware::from_fn(tag_origin))
+        .layer(middleware::from_fn_with_state(state.clone(), policy))
         .layer(Extension(origin))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .with_state(state)
@@ -212,7 +299,11 @@ async fn status(State(s): State<App>) -> ApiResult<Json<serde_json::Value>> {
         "library": { "tracks": tracks, "bytes": bytes },
         "devices": devices.len(),
         "relayStats": relay,
-        "identity": { "npub": s.identity.npub(), "pubkey": s.identity.pubkey_hex() },
+        "identity": { "npub": s.identity().npub(), "pubkey": s.identity().pubkey_hex() },
+        "account": s.account.summary(),
+        "relayEnabled": s.relay_enabled(),
+        "shared": s.account.shared(),
+        "listening": s.listen.status(),
         "companion": companion,
         "audio": s.player.describe(),
         "pendingPairs": s.pending_pair_count(),

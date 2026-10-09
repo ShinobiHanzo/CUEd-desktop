@@ -17,6 +17,11 @@ pub struct SharePayload {
     pub genres: Vec<String>,
     pub bpm: Option<f32>,
     pub version: u32,
+    /// "Send a friend request with it": the sender's account pubkey (hex) and name.
+    #[serde(default)]
+    pub friend_pubkey: Option<String>,
+    #[serde(default)]
+    pub friend_name: Option<String>,
 }
 
 impl SharePayload {
@@ -44,6 +49,12 @@ impl SharePayload {
         }
         if let Some(b) = self.bpm {
             q.push(("b", format!("{b:.1}")));
+        }
+        if let Some(fr) = &self.friend_pubkey {
+            q.push(("fr", fr.clone()));
+            if let Some(fname) = &self.friend_name {
+                q.push(("fn", fname.clone()));
+            }
         }
         build_query(&q)
     }
@@ -80,6 +91,8 @@ impl SharePayload {
             genres: get(&q, "g").map(|g| g.split(',').filter(|s| !s.trim().is_empty()).map(str::to_string).collect()).unwrap_or_default(),
             bpm: get(&q, "b").and_then(|b| b.parse().ok()),
             version: get(&q, "v").and_then(|v| v.parse().ok()).unwrap_or(1),
+            friend_pubkey: get(&q, "fr").map(|f| f.to_ascii_lowercase()).filter(|f| crate::link::is_hex(f, 64)),
+            friend_name: get(&q, "fn").map(str::to_string),
         })
     }
 }
@@ -99,6 +112,8 @@ mod tests {
             genres: vec!["rock".into(), "alt metal".into()],
             bpm: Some(128.04),
             version: 1,
+            friend_pubkey: None,
+            friend_name: None,
         };
         let s = p.encode();
         assert_eq!(
@@ -114,5 +129,19 @@ mod tests {
         assert_eq!(SharePayload::decode(&web).unwrap().artist, "Evanescence");
         assert!(SharePayload::decode("https://example.com/#t=x").is_err());
         assert!(SharePayload::decode("cued://share?a=only").is_err());
+    }
+
+    #[test]
+    fn friend_request_rides_along() {
+        let mut p = SharePayload::new("Song", "Band");
+        p.friend_pubkey = Some("ab".repeat(32));
+        p.friend_name = Some("Idris".into());
+        let s = p.encode();
+        assert!(s.ends_with(&format!("&fr={}&fn=Idris", "ab".repeat(32))), "{s}");
+        let back = SharePayload::decode(&s).unwrap();
+        assert_eq!(back.friend_pubkey.as_deref(), Some("ab".repeat(32).as_str()));
+        assert_eq!(back.friend_name.as_deref(), Some("Idris"));
+        // A bad key is dropped rather than failing the whole share.
+        assert_eq!(SharePayload::decode("cued://share?t=x&a=y&fr=zz").unwrap().friend_pubkey, None);
     }
 }

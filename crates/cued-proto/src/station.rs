@@ -31,6 +31,12 @@ pub struct StationTrack {
     /// Stable key on the host's side, so listeners can tell "same track again" from "moved on".
     #[serde(default)]
     pub key: String,
+    /// Capability URL on the host's desktop to stream the audio (friend streaming on). Phones ignore it until they learn it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<String>,
+    /// Capability URL for the lyrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lyrics: Option<String>,
 }
 
 impl StationTrack {

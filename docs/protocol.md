@@ -199,12 +199,192 @@ the phone's Downloads → Backend → **Companion (LAN)** setting takes
 which `cuedd` starts and watches; the finished files are also added to the
 desktop library.
 
-## 7. Trust model, said plainly
+## 7. Who may do what: the three tiers
 
-- LAN requests are plain HTTP with a bearer token, the same model as the
-  phone's own share server and the existing companion. Anyone on your Wi-Fi
-  who can read packets could read a token; pair at home, not at the airport.
-- From outside, everything goes through TLS to a cert you pinned.
-- The desktop holds files you chose to back up and a Nostr key pair. Both are
-  plain files under the data directory, yours to move or delete.
-- Nothing calls home. Upstream relays are the ones you listed.
+Code injection through the API is ruled out by construction: nothing that
+changes state is reachable from outside the LAN, and reads from outside need
+a biometric unlock on the phone every few minutes.
+
+| Tier | Who | Reaches the desktop how | Allowed |
+|---|---|---|---|
+| **Admin** | the person at the desktop | the LAN listener from a loopback address (the web UI) | everything |
+| **Phone on the LAN** | a paired phone | the LAN listener, from a private IPv4 (10/8, 172.16/12, 192.168/16) or loopback, `Authorization: Bearer` | everything a phone may do: sync, upload, settings, friends, listening |
+| **Phone away from home** | a paired phone | the funnel (`Origin::External`), `Authorization: Bearer` **and** `X-Cued-Assertion` | `GET`/`HEAD` on the read-only list below, and the relay websocket when the relay is on |
+
+Anything else is refused with `403 {"error":"writes only on the LAN"}` before
+a handler runs. A phone on a public IP that somehow reaches the LAN port is
+treated as remote too. There is no third path: no remote admin, no API key.
+
+**Read-only list** (remote): `/api/me`, `/api/library`, `/api/track/{sha}`
+(+ `/meta`, `/cover`, `/lyrics`), `/api/sync/status`, `/api/backup/snapshots`,
+`/api/backup/blobs`, `/api/backup/blob/{name}`, `/api/stations/feed`,
+`/api/stations/follows`, `/api/friends`, `/api/friends/requests`,
+`/api/account`, `/api/account/chain`, `/api/settings/shared`, `/api/auth/challenge`.
+
+### Biometric assertion
+
+At pairing the phone registers `biokey`: an ECDSA P-256 public key made in
+the Android Keystore with `setUserAuthenticationRequired(true)` (biometric or
+device credential), 65-byte uncompressed SEC1, hex. The private half can
+only sign after the person unlocks.
+
+1. `GET /api/auth/challenge` (bearer, any tier) →
+   `{"challenge":"<32 hex>","expiresInSec":120}`.
+2. The phone signs `cued-bio|<device>|<challenge>` (ASCII, SHA-256, ECDSA
+   P-256) after a biometric prompt.
+3. Every remote request carries `X-Cued-Assertion: <challenge>.<sig hex>`.
+   `sig` is 64 bytes `r||s`, or the Keystore's DER form; both are accepted.
+   An assertion is good for 10 minutes, then the phone unlocks again.
+
+A device that registered no `biokey` cannot read remotely at all. The desktop
+never sees a fingerprint or a face; it sees a signature from a key the phone
+refuses to use without one.
+
+## 8. Accounts: one key, every device
+
+An account **is** a secp256k1 key pair, the same one Stations already use.
+Its id is `sha256(pubkey)` hex, and what other people see is only the
+public key (`npub…`) and a name. The private key lives on each device the
+account is bound to and nowhere else.
+
+### The account chain
+
+Every account keeps a small signed, hash-linked chain of blocks, held in
+full on each of its devices and shipped between them on the LAN or through
+the relay. Only the holder of the private key can extend it, so no server,
+no consensus and no coin are involved: it is self-custody with a tamper-
+evident history, and it is what lets you walk up to a new computer and be
+the same person.
+
+```json
+{"v":1,"height":3,"prev":"<hash of block 2>","ts":1700000000,
+ "type":"bind_device","data":{"devhash":"<64 hex>","name":"Pixel 8","kind":"phone"},
+ "pubkey":"<64 hex>","hash":"<sha256 of canonical [v,height,prev,ts,type,data,pubkey]>",
+ "sig":"<BIP-340 over hash>"}
+```
+
+Block types: `create {name}` (height 0, `prev` empty), `profile {name}`,
+`bind_device {devhash,name,kind}`, `unbind_device {devhash}`,
+`settings {…}` (the shared settings, §11). `devhash` is
+`sha256("cued-device|" + device id + "|" + per-install random salt)`: a
+unique hash of the device that reveals nothing about it.
+
+Validity: heights are consecutive, `prev` matches, every block is signed by
+the key of block 0. `data` is hashed exactly as its author wrote it, so every
+implementation keeps object keys in their original order (serde_json with
+`preserve_order`, Python dicts, Kotlin `JsonObject`); none may sort them. Merging two copies: the longer valid chain wins; equal
+height, the lower tip hash wins; the loser's extra blocks are re-appended
+on top when they still apply. `GET /api/account/chain` is read-only (remote
+allowed); `POST /api/account/chain {"blocks":[…]}` (LAN) merges.
+
+### Pairing and accounts
+
+`PairRequest` gains three fields:
+
+```json
+{"…":"…","account":"join|keep|separate","biokey":"<130 hex>","devhash":"<64 hex>"}
+```
+
+| `account` | Meaning | What crosses the wire |
+|---|---|---|
+| `join` | the phone takes the desktop's account | the pair response carries `"account":{"sealed":"…"}`: the desktop's secret key and chain, sealed with the pairing secret |
+| `keep` | the desktop takes the phone's account | the phone then `POST /api/account/import {"sealed":"…"}` on the LAN; the desktop replaces its key and chain, binds itself with a `bind_device` block |
+| `separate` | two accounts, paired devices | nothing |
+
+A desktop that has never had an account answers `join` with a fresh one it
+makes on the spot. "Scan the same connect-your-phone code on another
+computer and choose new or keep" is exactly `join` versus `keep`.
+
+### Seal
+
+The pairing secret never crosses the wire, so a key derived from it is a
+private channel. `seal(secret, label, plaintext)`:
+
+```
+k   = HMAC-SHA256(key = "cued-seal-v1", msg = secret bytes || label)
+ke  = HMAC-SHA256(k, "enc");  km = HMAC-SHA256(k, "mac")
+nonce = 16 random bytes
+keystream block i (0-based) = HMAC-SHA256(ke, nonce || i as u32 big-endian)
+ct  = plaintext XOR keystream
+tag = HMAC-SHA256(km, nonce || ct)
+sealed = base64url(nonce || ct || tag)
+```
+
+Plain HMAC in counter mode with an encrypt-then-MAC tag: every platform here
+has HMAC-SHA256 in its standard library, and all of it fits on one screen.
+Label is `account` for the account bundle.
+
+## 9. Friends
+
+A friend is a public key you chose to trust with your station and your
+presence. Friend lists live on your devices; what leaves is only your public
+key, your name, and a signed "request/accept/remove".
+
+- Link: `cued://friend?p=<pubkey>&n=<name>&r=<relays>` shown as a QR code
+  and offered over NFC exactly like a share. Scanning someone's link sends
+  them a request; two people scanning each other are friends at once.
+- A share can carry a friend request: `cued://share?…&fr=<pubkey>&fn=<name>`
+  (the "send a friend request" toggle on the sharing page). Receivers on
+  older builds ignore the fields.
+- Over relays, the request is a Nostr event, kind `30778`, `d` =
+  `friend:<target pubkey>`, tags `["p", target]`, `["t","cued-friend"]`,
+  content `{"v":1,"name":"…","status":"request|accept|remove","ts":…}`,
+  signed by the sender. Each side subscribes to `#p` = its own key.
+- States on each side: `pending_out`, `pending_in`, `friends`. Friends are
+  followed as stations automatically.
+- API: `GET /api/friends`, `GET /api/friends/requests`, `GET /api/friends/link`,
+  `POST /api/friends {"text":"<link or npub>"}`, `POST /api/friends/{pubkey}/accept`,
+  `DELETE /api/friends/{pubkey}`.
+
+## 10. Listening in
+
+A station is metadata only: the current track and the next three, nothing
+more, ever (`StationTrack` in §4). To let friends *hear* it, the host's
+desktop adds, when its *friend streaming* setting is on, three capability
+URLs to each `StationTrack`: `stream`, `cover`, `lyrics`, each
+`https://<host>/share/<sha>/<cap>[/cover|/lyrics]`, valid for two hours and
+minted only while the track is in the current-or-next-three window.
+
+A listener (phone or desktop) resolves every entry in this order:
+
+1. a track already in its own library (title and artist match),
+2. the host's `stream` URL, saved as a temporary file,
+3. the `link` through its downloader, as a temporary file.
+
+Then it plays at `now − startedAt`, nudging only when more than three
+seconds off: a few seconds between friends is fine. Temporary audio,
+thumbnails, lyrics and metadata are kept for **48 hours** then evicted, so a
+listener can look back at what was on. On the desktop: `POST /api/stations/listen
+{"pubkey":"…"}`, `DELETE /api/stations/listen`, `GET /api/stations/listen`,
+cache under `<data>/cache/stations/`.
+
+Cover art and lyrics come from `GET /api/track/{sha}/cover` (the embedded
+picture) and `GET /api/track/{sha}/lyrics` (`.lrc` sidecar, else the embedded
+lyrics tag), both read-only.
+
+## 11. Shared settings and the relay switch
+
+Settings that should be the same on every device of an account live in the
+latest `settings` block of the account chain:
+
+```json
+{"relayEnabled":false,"friendStreaming":true,"theme":{"bg":"#0e0f13","panel":"#161820","text":"#ececf1","accent":"#5ef2c6","accent2":"#7aa2ff","danger":"#ff6b7a"},"stationName":""}
+```
+
+`GET /api/settings/shared` (read-only) and `PUT /api/settings/shared` (LAN or
+admin, partial object) append a block and notify every open UI. **The
+desktop relay is off by default.** While off, `/relay` answers `403` and
+nothing is mirrored; turning it on from any device turns it on everywhere.
+
+## 12. Trust model, said plainly
+
+- Writes happen only on your own Wi-Fi, from a device you paired, with its
+  token. From outside, the desktop is read-only, and only after the phone's
+  biometric unlock.
+- The account's private key is on your devices and in sealed transfers
+  between them; the seal key comes from a QR code only the two devices saw.
+- Friends and stations see public keys, names and track metadata. Audio
+  moves only through capability URLs you turned on, to friends, for the
+  tracks you are playing now and next.
+- Nothing calls home. Upstream relays are the ones you listed, and the
+  desktop's own relay stays off until you switch it on.

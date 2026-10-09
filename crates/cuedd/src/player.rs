@@ -90,7 +90,11 @@ impl Player {
 
     /// Plays `t` now (crossfading from whatever is playing).
     pub fn load(&self, t: &Track) -> anyhow::Result<()> {
-        let item = QueueItem::from(t);
+        self.load_item(QueueItem::from(t))
+    }
+
+    /// Plays any file (a temporary station download, for instance).
+    pub fn load_item(&self, item: QueueItem) -> anyhow::Result<()> {
         if let Some(e) = &self.engine {
             e.load(Path::new(&item.path), true)?;
         }

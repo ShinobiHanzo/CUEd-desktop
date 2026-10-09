@@ -106,3 +106,53 @@ def test_decode_link_dispatch():
     assert isinstance(links.decode_link(StationLink(PUB).encode()), StationLink)
     assert isinstance(links.decode_link(PairLink(secret="aa" * 16).encode()), PairLink)
     assert links.decode_link("spotify:track:xyz") is None
+
+
+# ---------------------------------------------------------------- friends (§9) and friend requests in shares
+
+
+def test_friend_link_round_trip_matches_rust():
+    from cued_companion.links import FriendLink
+
+    l = FriendLink("ab" * 32, "Idris", ["wss://nos.lol"])
+    s = l.encode()
+    assert s == "cued://friend?p=%s&n=Idris&r=wss%%3A%%2F%%2Fnos.lol" % ("ab" * 32)
+    assert FriendLink.decode(s) == l
+    assert FriendLink.decode("cued://friend?p=zz") is None
+    assert FriendLink.decode("cued://friend?n=x") is None
+    assert FriendLink.decode("cued://station?p=" + PUB) is None
+    assert FriendLink.decode("cued://friend?p=" + PUB.upper()) == FriendLink(PUB)
+    assert FriendLink(PUB, "  ").encode() == "cued://friend?p=" + PUB  # blank name omitted
+    assert isinstance(links.decode_link(s), FriendLink)
+    assert links.decode_link(s) == l
+    # the kind-30778 event shape
+    assert links.FRIEND_KIND == 30778
+    assert links.friend_tags(PUB) == [["d", "friend:" + PUB], ["p", PUB], ["t", "cued-friend"]]
+    assert links.friend_filter(PUB) == {"kinds": [30778], "#p": [PUB]}
+    assert links.friend_filter(PUB, since=5)["since"] == 5
+
+
+def test_share_carries_friend_request():
+    p = SharePayload(title="Song", artist="Band", friend_pubkey="ab" * 32, friend_name="Idris")
+    s = p.encode()
+    assert s == "cued://share?v=1&t=Song&a=Band&fr=%s&fn=Idris" % ("ab" * 32)
+    # fr/fn come after b when both are present
+    full = sample()
+    full.friend_pubkey = "ab" * 32
+    full.friend_name = "Idris"
+    assert full.encode() == EXPECTED_SHARE + "&fr=%s&fn=Idris" % ("ab" * 32)
+    d = SharePayload.decode(full.encode())
+    assert d.friend_pubkey == "ab" * 32 and d.friend_name == "Idris" and d.title == full.title and d.bpm == 128.0
+    # web form carries it too
+    assert SharePayload.decode(full.encode_web()).friend_pubkey == "ab" * 32
+    # fn without fr is not emitted; fr alone is
+    assert SharePayload(title="x", friend_name="n").encode() == "cued://share?v=1&t=x&a="
+    assert SharePayload(title="x", friend_pubkey="ab" * 32).encode() == "cued://share?v=1&t=x&a=&fr=" + "ab" * 32
+    # a bad key is dropped rather than failing the whole share (share.rs does the same); the name stays
+    d = SharePayload.decode("cued://share?t=x&a=y&fr=zz&fn=Who")
+    assert d is not None and d.friend_pubkey is None and d.friend_name == "Who" and d.title == "x"
+    d = SharePayload.decode("cued://share?t=x&a=y&fr=" + ("AB" * 32))
+    assert d.friend_pubkey == "ab" * 32
+    # plain shares are unchanged
+    assert SharePayload.decode(sample().encode()).friend_pubkey is None
+    assert sample().encode() == EXPECTED_SHARE
