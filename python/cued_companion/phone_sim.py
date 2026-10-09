@@ -154,12 +154,26 @@ class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
             c.pin = pin
             return c
 
-        return self.do_open(factory, req)
+        return self.do_open(factory, req, context=self._context)
+
+
+# Fingerprint of the desktop's funnel certificate once paired through it; every later request pins it.
+DEFAULT_PIN: Optional[str] = None
+
+
+def pinned_ssl_context() -> ssl.SSLContext:
+    """TLS with no CA check at all; the caller compares the peer's DER SHA-256 to the pin itself."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 def make_opener(cert_sha256: Optional[str] = None) -> urllib.request.OpenerDirector:
     """No proxies (this is LAN traffic), optional cert pinning for the funnel."""
     handlers: list = [urllib.request.ProxyHandler({})]
+    if cert_sha256 is None:
+        cert_sha256 = DEFAULT_PIN
     if cert_sha256:
         handlers.append(_PinnedHTTPSHandler(cert_sha256))
     return urllib.request.build_opener(*handlers)
@@ -222,8 +236,8 @@ def _describe(status: int, body) -> str:
 # ---------------------------------------------------------------- pair
 
 
-def pair_with(link: links.PairLink, name: str, device: str, pubkey: str) -> Tuple[str, dict]:
-    """Try each LAN address, then the funnel with its cert pinned. Returns (base url used, response json)."""
+def pair_with(link: links.PairLink, name: str, device: str, pubkey: str) -> Tuple[str, dict, Optional[str]]:
+    """Try each LAN address, then the funnel with its cert pinned. Returns (base url used, response json, pin used)."""
     body = links.build_pair_request(link, name, device, pubkey)
     attempts: List[Tuple[str, Optional[str]]] = [(a, None) for a in link.addresses]
     if link.funnel:
@@ -239,7 +253,7 @@ def pair_with(link: links.PairLink, name: str, device: str, pubkey: str) -> Tupl
             errors.append(str(e))
             continue
         if status == 200 and isinstance(resp, dict) and resp.get("token"):
-            return base, resp
+            return base, resp, pin
         if status == 403:
             raise SimError("desktop refused the pairing (wrong or expired secret); show a fresh QR")
         if status == 409:
@@ -254,8 +268,10 @@ def cmd_pair(args, state: dict) -> int:
         raise SimError("not a cued://pair link")
     device = ensure_device(state)
     _, pubkey = ensure_identity(state)
-    base, resp = pair_with(link, args.name, device, pubkey)
-    state.update({"desktop": base, "token": resp["token"], "name": args.name, "desktop_info": resp.get("desktop", {}), "paired_at": int(time.time())})
+    base, resp, pin = pair_with(link, args.name, device, pubkey)
+    state.update({"desktop": base, "token": resp["token"], "name": args.name, "desktop_info": resp.get("desktop", {}), "paired_at": int(time.time()), "cert": pin})
+    global DEFAULT_PIN
+    DEFAULT_PIN = pin
     save_state(args.state, state)
     info = resp.get("desktop", {})
     print("paired with %s at %s (relay %s, device %s)" % (info.get("name") or link.name or "desktop", base, info.get("relay") or link.relay or "-", device))
@@ -498,14 +514,23 @@ def _import_websockets():
 
 
 async def publish_station(relay: str, secret_hex: str, name: str, title: str, artist: str, seconds: float,
-                          interval: float = 10.0, link: Optional[str] = None, log: Callable[[str], None] = print) -> int:
+                          interval: float = 10.0, link: Optional[str] = None, log: Callable[[str], None] = print,
+                          cert_sha256: Optional[str] = None) -> int:
     websockets = _import_websockets()
     started = int(time.time() * 1000)
     seq = 0
     published = 0
     deadline = time.monotonic() + seconds
+    kw: dict = {}
+    if relay.startswith("wss://") and cert_sha256:
+        kw["ssl"] = pinned_ssl_context()
     try:
-        async with websockets.connect(relay, open_timeout=CONNECT_TIMEOUT * 2, close_timeout=3) as ws:
+        async with websockets.connect(relay, open_timeout=CONNECT_TIMEOUT * 2, close_timeout=3, **kw) as ws:
+            if "ssl" in kw:
+                ssl_obj = ws.transport.get_extra_info("ssl_object")
+                got = hashlib.sha256(ssl_obj.getpeercert(binary_form=True) or b"").hexdigest() if ssl_obj else ""
+                if got != cert_sha256.lower():
+                    raise NetError("relay %s: certificate pin mismatch (presented %s, QR said %s)" % (relay, got[:16], cert_sha256[:16]))
             while True:
                 seq += 1
                 content = json.dumps(nostr.station_state(name, title, artist, link=link, key="sim-1", started_at_ms=started, seq=seq), separators=(",", ":"))
@@ -548,7 +573,8 @@ def cmd_station(args, state: dict) -> int:
         raise SimError("--relay is required (not paired, so no relay is known)")
     print("station %s by %s: publishing kind %d every %gs for %gs to %s" % (args.name, nostr.npub(pubkey), nostr.STATION_KIND, args.interval, args.seconds, relay))
     print("follow link: " + links.StationLink(pubkey, args.name, [relay]).encode())
-    n = asyncio.run(publish_station(relay, secret, args.name, args.title, args.artist, args.seconds, args.interval, args.link))
+    pin = getattr(args, "cert", None) or state.get("cert")
+    n = asyncio.run(publish_station(relay, secret, args.name, args.title, args.artist, args.seconds, args.interval, args.link, cert_sha256=pin))
     print("%d state(s) accepted" % n)
     return 0 if n else 1
 
@@ -624,6 +650,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("station", help="publish signed kind-30777 station states to a relay (needs websockets)")
     p.add_argument("--relay", default=None, help="ws://host:8770/relay (default: the paired desktop's relay)")
+    p.add_argument("--cert", default=None, help="SHA-256 of the desktop's funnel certificate for wss:// (default: the one from pairing)")
     p.add_argument("--name", required=True)
     p.add_argument("--title", required=True)
     p.add_argument("--artist", required=True)
@@ -650,6 +677,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         state = load_state(args.state)
+        global DEFAULT_PIN
+        DEFAULT_PIN = state.get("cert")
         return args.fn(args, state)
     except SimError as e:
         print("error: %s" % e, file=sys.stderr)
