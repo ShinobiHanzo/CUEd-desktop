@@ -1,0 +1,19 @@
+[package]
+name = "cued-proto"
+description = "What a CUEd phone and a CUEd desktop say to each other: share, station and pair links, signed Nostr station events, npub/nsec identifiers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+k256 = { workspace = true }
+bech32 = { workspace = true }
+percent-encoding = { workspace = true }
+thiserror = { workspace = true }

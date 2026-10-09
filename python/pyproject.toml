@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cued-companion"
+version = "0.1.0"
+description = "CUEd desktop companion: spotdl download worker, cued:// link and Nostr codecs, and a phone simulator for testing cuedd"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+relay = ["websockets>=11"]
+spotdl = ["spotdl"]
+dev = ["pytest"]
+
+[project.scripts]
+cued-companion = "cued_companion.server:main"
+cued-phone-sim = "cued_companion.phone_sim:main"
+
+[tool.setuptools]
+packages = ["cued_companion"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

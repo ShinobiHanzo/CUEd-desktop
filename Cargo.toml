@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cued-proto",
+    "crates/cued-relay",
+    "crates/cued-funnel",
+    "crates/cued-audio",
+    "crates/cuedd",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/ShinobiHanzo/CUEd-desktop"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "process", "signal"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+rand = "0.8"
+k256 = { version = "0.13", features = ["schnorr", "arithmetic"] }
+bech32 = "0.11"
+percent-encoding = "2"
+url = "2"
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rcgen = "0.13"
+qrcode = { version = "0.14", default-features = false }

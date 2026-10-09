@@ -1,0 +1,32 @@
+[package]
+name = "cued-funnel"
+description = "Self-hosted funnel for the CUEd desktop: a public edge that multiplexes TCP connections over one authenticated control link into cuedd, plus the client, TLS forwarder and certificate pinning"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "cued-funnel"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tokio-util = "0.7"
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = "2"
+rcgen = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }

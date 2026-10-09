@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CUEd desktop</title>
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand"><img src="/icon.svg" alt=""><span>CUEd</span><small id="desktop-name"></small></div>
+  <nav>
+    <button data-tab="link" class="active">Link a phone</button>
+    <button data-tab="library">Library</button>
+    <button data-tab="backup">Backup</button>
+    <button data-tab="stations">Stations</button>
+    <button data-tab="relay">Relay &amp; funnel</button>
+    <button data-tab="downloads">Downloads</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+  <div class="live" id="live-dot" title="live connection to cuedd"></div>
+</header>
+
+<main>
+  <section id="tab-link" class="tab active">
+    <div class="cols">
+      <div class="card">
+        <h2>Scan with CUEd on the phone</h2>
+        <p class="muted">Receive → paste or scan. The code carries a one-time secret, this desktop's LAN addresses, its relay and the funnel address when one is set. It expires in 10 minutes.</p>
+        <div class="qr" id="pair-qr"><button id="pair-new" class="primary">Show a pairing code</button></div>
+        <details><summary>The link as text</summary><code id="pair-link" class="wrap"></code></details>
+        <p class="muted small" id="pair-addrs"></p>
+      </div>
+      <div class="card">
+        <h2>Linked phones</h2>
+        <div id="devices" class="list"></div>
+        <p class="muted small">Unlinking forgets the phone's token; its backed-up tracks stay in the library.</p>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Pull a track a phone is sharing right now</h2>
+      <p class="muted">On the phone: track menu → Share. Paste the <code>cued://share…</code> or the <code>shinobihanzo.github.io/CUEd/#…</code> link here. Works with today's app, no pairing needed.</p>
+      <form id="receive-form" class="row"><input id="receive-text" placeholder="cued://share?v=1&amp;t=…" required><button class="primary">Pull</button></form>
+      <p id="receive-result" class="muted small"></p>
+    </div>
+  </section>
+
+  <section id="tab-library" class="tab">
+    <div class="toolbar">
+      <input id="lib-search" placeholder="Search title, artist, album">
+      <select id="lib-device"><option value="">All sources</option></select>
+      <span id="lib-count" class="muted"></span>
+      <form id="import-form" class="row grow"><input id="import-path" placeholder="Import a folder or file on this computer (path)"><button>Import</button></form>
+    </div>
+    <table id="lib-table"><thead><tr><th></th><th>Title</th><th>Artist</th><th>Album</th><th class="num">BPM</th><th class="num">Length</th><th>On</th><th></th></tr></thead><tbody></tbody></table>
+  </section>
+
+  <section id="tab-backup" class="tab">
+    <div id="backup-cards" class="cards"></div>
+    <div class="card">
+      <h2>How backup works</h2>
+      <p class="muted">The phone sends a manifest (what it has, with a SHA-256 per file), the desktop answers with what it lacks, the phone uploads those, resumable. Files live under <code id="data-dir"></code>/library, content-addressed, so a track from two phones is stored once. A track that leaves the phone is kept here and shown as "not on phone".</p>
+    </div>
+  </section>
+
+  <section id="tab-stations" class="tab">
+    <div class="cols">
+      <div class="card">
+        <h2>Following</h2>
+        <form id="follow-form" class="row"><input id="follow-text" placeholder="cued://station?… or npub1…" required><button class="primary">Follow</button></form>
+        <div id="stations-feed" class="list"></div>
+      </div>
+      <div class="card">
+        <h2>This desktop's station</h2>
+        <p class="muted">Broadcast what the desktop player plays: metadata only, signed with this desktop's key, through the embedded relay and the upstream relays.</p>
+        <div class="row"><input id="station-name" placeholder="Station name"><button id="host-toggle" class="primary">Start</button></div>
+        <div class="qr small-qr" id="station-qr"></div>
+        <code id="station-npub" class="wrap"></code>
+        <details><summary>Identity</summary><p class="muted small">The key pair is <code>identity.json</code> in the data directory. <button id="reveal-nsec" class="link">Show nsec</button> <code id="nsec"></code></p></details>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-relay" class="tab">
+    <div class="cols">
+      <div class="card">
+        <h2>Embedded relay</h2>
+        <p>Phones add <code id="relay-url"></code> under Stations → relays. Their social traffic then goes through this desktop; nothing else sees who follows whom.</p>
+        <div id="relay-stats" class="kv"></div>
+        <h3>Upstream relays</h3>
+        <p class="muted small">Events from paired phones and this desktop are mirrored out; followed stations are pulled in. Any <code>wss://</code> works, including your own.</p>
+        <div id="upstream" class="list"></div>
+        <form id="upstream-form" class="row"><input id="upstream-url" placeholder="wss://relay.example.net"><button>Add</button></form>
+        <label class="check"><input type="checkbox" id="mirror-out"> Mirror out</label>
+        <label class="check"><input type="checkbox" id="mirror-in"> Mirror in</label>
+      </div>
+      <div class="card">
+        <h2>Self-hosted funnel</h2>
+        <div id="funnel" class="kv"></div>
+        <p class="muted small">Run <code>cued-funnel edge</code> on any box with a public address and start <code>cuedd --funnel host:8771 --funnel-psk …</code>. The desktop connects outbound; the edge forwards TLS bytes it cannot read; the phone pins the certificate from the QR code. See docs/funnel.md.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-downloads" class="tab">
+    <div class="card">
+      <h2>Companion downloads</h2>
+      <p class="muted">The phone's Downloads → Backend → Companion (LAN) takes this desktop's address as is. Jobs run in the Python worker with spotdl and land in the library.</p>
+      <div id="companion" class="kv"></div>
+      <form id="job-form" class="row"><input id="job-url" placeholder="Spotify / YouTube link or a search" required><button class="primary">Download here</button></form>
+      <div id="jobs" class="list"></div>
+    </div>
+  </section>
+
+  <section id="tab-settings" class="tab">
+    <div class="card">
+      <h2>Settings</h2>
+      <form id="settings-form" class="form">
+        <label>Desktop name <input name="name"></label>
+        <label>Crossfade seconds <input name="crossfade_seconds" type="number" min="0" max="20" step="0.5"></label>
+        <label>Crossfade curve <select name="crossfade_curve"><option value="0">Equal power</option><option value="1">Linear</option><option value="2">Smooth step</option></select></label>
+        <label>Companion format <select name="companion_format"><option>m4a</option><option>mp3</option><option>opus</option><option>flac</option></select></label>
+        <button class="primary">Save</button>
+      </form>
+      <div id="about" class="kv"></div>
+    </div>
+  </section>
+</main>
+
+<footer id="player">
+  <canvas id="spectrum" width="640" height="48"></canvas>
+  <div class="now">
+    <div id="now-title">Nothing playing</div>
+    <div id="now-artist" class="muted small"></div>
+  </div>
+  <div class="controls">
+    <button id="p-play" title="Play / pause">▶</button>
+    <button id="p-next" title="Next (crossfade)">⏭</button>
+    <button id="p-stop" title="Stop">■</button>
+    <input id="p-seek" type="range" min="0" max="1000" value="0">
+    <span id="p-time" class="muted small">0:00</span>
+    <input id="p-vol" type="range" min="0" max="100" value="100" title="Volume">
+    <span id="p-queue" class="muted small"></span>
+  </div>
+</footer>
+
+<div id="toast"></div>
+<template id="share-dialog"><div class="modal"><div class="card"><h2>Send to a phone</h2><p class="muted small">On the phone: Receive → Scan a QR code. The link works for 30 minutes; the phone pulls the file straight from this desktop.</p><div class="qr"></div><code class="wrap"></code><button class="primary close">Done</button></div></div></template>
+<script src="/app.js"></script>
+</body>
+</html>

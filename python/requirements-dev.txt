@@ -1,0 +1,2 @@
+pytest>=7
+websockets>=11  # optional: only the station publisher and its test need it
