@@ -7,7 +7,8 @@ use std::path::PathBuf;
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let native = manifest.join("../../native/cued-audio");
-    let native = native.canonicalize().unwrap_or(native);
+    // canonicalize() yields a verbatim `\\?\` path on Windows, which cl.exe cannot open.
+    let native = native.canonicalize().map(strip_verbatim).unwrap_or(native);
     let src = native.join("src");
     let include = native.join("include");
     let miniaudio = native.join("third_party/miniaudio");
@@ -70,5 +71,14 @@ fn main() {
             println!("cargo:rustc-link-lib=pthread");
             println!("cargo:rustc-link-lib=m");
         }
+    }
+}
+
+/// `\\?\C:\...` → `C:\...`; a no-op on every other platform.
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest.strip_prefix("UNC\\").map(|r| format!("\\\\{r}")).unwrap_or_else(|| rest.to_string())),
+        None => p,
     }
 }

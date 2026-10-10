@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2
+
+- Windows release build: the audio engine's build script fed `cl.exe` a verbatim `\\?\` path
+  from `canonicalize()`, which it cannot open; the prefix is stripped now. 0.2.1 shipped
+  Linux and macOS archives only.
+
 ## 0.2.1
 
 - **Three tiers.** Nothing that changes state is reachable from outside the LAN: admin is the
