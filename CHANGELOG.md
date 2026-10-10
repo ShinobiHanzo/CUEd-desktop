@@ -26,6 +26,10 @@
   New Friends tab. Cover art and lyrics endpoints.
 - Phone repo: `FriendLink`, `Seal`, `AccountChain` codecs in `core`, share friend fields,
   `docs/desktop.md` round-2 list.
+- Release archives for Linux, macOS and Windows published from CI on every `v*` tag (or a
+  manual run with a tag name), with the changelog section as the notes.
+- Phone app brought to parity: pairing with the account choice, biometric reads, backup,
+  streaming the desktop library, friends, listening in, shared settings, mini player.
 
 ## 0.1.0
 
