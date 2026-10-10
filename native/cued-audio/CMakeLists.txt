@@ -31,7 +31,7 @@ add_library(cued_audio STATIC
 target_include_directories(cued_audio
   PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio)
-target_link_libraries(cued_audio PUBLIC Threads::Threads ${CMAKE_DL_LIBS} m)
+target_link_libraries(cued_audio PUBLIC Threads::Threads ${CMAKE_DL_LIBS} $<$<NOT:$<PLATFORM_ID:Windows>>:m>)
 target_compile_options(cued_audio PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>
   # miniaudio is third-party; keep its warnings out of our build log.

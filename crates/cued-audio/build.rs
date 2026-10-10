@@ -36,6 +36,7 @@ fn main() {
         .warnings(true)
         .extra_warnings(true)
         .flag_if_supported("-Wpedantic")
+        .flag_if_supported("/EHsc")
         .opt_level(2);
     for f in &cpp_files {
         println!("cargo:rerun-if-changed={}", f.display());

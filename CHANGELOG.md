@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.3
+
+- Windows: the ffmpeg fallback decoder spawned its child with fork/exec and `sys/wait.h`, so the
+  engine did not compile with MSVC; it now uses `CreateProcess` with an inheritable pipe there
+  (same code path otherwise). MSVC builds with `/EHsc`. 0.2.2 fixed the build script's path
+  problem but still shipped without a Windows archive.
+- CI: `workflow_dispatch` gained a *dry run* switch that builds every platform's archive without
+  tagging or publishing.
+
 ## 0.2.2
 
 - Windows release build: the audio engine's build script fed `cl.exe` a verbatim `\\?\` path
