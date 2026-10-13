@@ -22,6 +22,8 @@ pub struct Settings {
     pub companion_format: String,
     /// Name of the desktop's own station.
     pub station_name: String,
+    /// Let devices on the LAN that are not paired use the companion downloader (pre-0.2.4 behaviour).
+    pub companion_open_lan: bool,
 }
 
 impl Default for Settings {
@@ -35,6 +37,7 @@ impl Default for Settings {
             crossfade_curve: 0,
             companion_format: "m4a".into(),
             station_name: String::new(),
+            companion_open_lan: false,
         }
     }
 }
@@ -53,7 +56,20 @@ impl Settings {
 }
 
 pub fn hostname() -> String {
-    std::fs::read_to_string("/etc/hostname").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).or_else(|| std::env::var("COMPUTERNAME").ok()).or_else(|| std::env::var("HOSTNAME").ok()).unwrap_or_else(|| "CUEd desktop".into())
+    let clean = |s: String| {
+        let s = s.trim().trim_end_matches(".local").trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    };
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .and_then(clean)
+        .or_else(|| std::env::var("COMPUTERNAME").ok().and_then(clean))
+        .or_else(|| std::env::var("HOSTNAME").ok().and_then(clean))
+        .or_else(|| {
+            // macOS and the BSDs have no /etc/hostname; `hostname` is everywhere.
+            std::process::Command::new("hostname").output().ok().filter(|o| o.status.success()).and_then(|o| clean(String::from_utf8_lossy(&o.stdout).into_owned()))
+        })
+        .unwrap_or_else(|| "CUEd desktop".into())
 }
 
 /// `$XDG_DATA_HOME/cued` or `~/.local/share/cued`, `%APPDATA%\cued` on Windows.

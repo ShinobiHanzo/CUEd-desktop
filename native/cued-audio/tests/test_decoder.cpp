@@ -145,6 +145,40 @@ int main() {
             CHECK_NEAR(a.duration_sec, 3.0, 0.2);
             CHECK(a.sample_rate == 44100);
             std::remove(m4a.c_str());
+
+            // Longer than the 30 s ring: reading all of it must not grow past the window, and a
+            // seek beyond what is buffered restarts ffmpeg at the right place.
+            const std::string longM4a = dir + "/cued_test_long.m4a";
+            cmd = "ffmpeg -nostdin -v error -y -f lavfi -i \"sine=frequency=440:duration=70\" -c:a aac \"" + longM4a + "\" 2>/dev/null";
+            if (std::system(cmd.c_str()) == 0) {
+                auto d2 = Decoder::open(longM4a, 48000, 2, Decoder::Format::F32, err);
+                CHECK_MSG(d2 != nullptr, "%s", err.c_str());
+                if (d2) {
+                    std::vector<float> buf(48000 * 2);
+                    uint64_t got = d2->read(buf.data(), 48000);
+                    CHECK(got > 0);
+                    // Forward past the ring: 60 s in.
+                    CHECK(d2->seek(48000ull * 60));
+                    uint64_t tail = 0;
+                    for (int guard = 0; guard < 40; ++guard) {
+                        uint64_t n = d2->read(buf.data(), 48000);
+                        tail += n;
+                        if (d2->atEnd()) break;
+                    }
+                    CHECK_MSG(tail > 48000ull * 8 && tail < 48000ull * 12, "tail after seek %llu", (unsigned long long)tail);
+                    CHECK_NEAR(static_cast<double>(d2->lengthFrames()) / 48000.0, 70.0, 1.0);
+                    // Back to the start: a backwards seek is a restart too.
+                    CHECK(d2->seek(0));
+                    CHECK(!d2->atEnd());
+                    // read() never blocks the audio thread for more than 20 ms, so right after a
+                    // restart it hands back silence until ffmpeg has produced the first frames.
+                    uint64_t afterRestart = 0;
+                    for (int guard = 0; guard < 250 && afterRestart == 0; ++guard) afterRestart = d2->read(buf.data(), 48000);
+                    CHECK(afterRestart > 0);
+                    CHECK_MSG(d2->cursor() >= afterRestart && d2->cursor() < 48000ull * 2, "cursor %llu", (unsigned long long)d2->cursor());
+                }
+                std::remove(longM4a.c_str());
+            }
         } else {
             std::printf("ffmpeg not available; skipping m4a fallback check\n");
         }

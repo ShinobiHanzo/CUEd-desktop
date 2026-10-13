@@ -111,7 +111,7 @@ hours (§10). Theme colours live in the account chain too, so your phones match 
 
 ## Status
 
-Second cut (0.2.3). Everything above runs and is tested on Linux; the UI is a web page served by the daemon,
+Second cut (0.2.4). Everything above runs and is tested on Linux; the UI is a web page served by the daemon,
 which is what makes it work on an old laptop or a Pi next to the router. A native window (webview)
 and a tray icon are the obvious next step. The phone app still has to learn the `cued://pair` link
 and the sync calls (`docs/protocol.md` §2–3 is the spec; the phone repo's `docs/desktop.md` tracks

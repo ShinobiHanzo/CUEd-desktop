@@ -365,11 +365,13 @@ loaders.relay = guard(async () => {
 $('#upstream-form').addEventListener('submit', guard(async e => { e.preventDefault(); const s = await api('/api/settings'); const u = $('#upstream-url').value.trim(); if (!/^wss?:\/\//.test(u)) throw new Error('relay URLs start with wss://'); await api('/api/settings', { method: 'PUT', body: { upstream_relays: [...s.upstream_relays, u] } }); $('#upstream-url').value = ''; loaders.relay(); }));
 $('#mirror-out').addEventListener('change', guard(async e => { await api('/api/settings', { method: 'PUT', body: { mirror_out: e.target.checked } }); }));
 $('#mirror-in').addEventListener('change', guard(async e => { await api('/api/settings', { method: 'PUT', body: { mirror_in: e.target.checked } }); }));
+$('#companion-open').addEventListener('change', guard(async e => { await api('/api/settings', { method: 'PUT', body: { companion_open_lan: e.target.checked } }); }));
 
 /* ---------- downloads ---------- */
 loaders.downloads = guard(async () => {
   await loadStatus();
   const c = status.companion || {};
+  try { const s = await api('/api/settings'); $('#companion-open').checked = !!s.companion_open_lan; } catch (_) {}
   $('#companion').innerHTML = kv({ Worker: c.running ? '<span class="badge on">running</span>' : `<span class="badge">off</span> ${esc(c.error || '')}`, Python: esc(c.python || ''), 'Imported into library': c.imported ?? 0 });
   const el = $('#jobs');
   if (!c.running) { el.innerHTML = ''; return; }

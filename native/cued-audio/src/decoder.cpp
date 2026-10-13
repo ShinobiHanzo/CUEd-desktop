@@ -349,11 +349,7 @@ ProbeInfo probe(const std::string& path) {
 
 class FfmpegDecoder final : public Decoder {
 public:
-    ~FfmpegDecoder() override {
-        stop_.store(true);
-        if (!reaped_.load()) child_.kill();
-        if (thread_.joinable()) thread_.join();
-    }
+    ~FfmpegDecoder() override { stopChild(); }
 
     static std::unique_ptr<FfmpegDecoder> open(const std::string& path, int outSampleRate, int outChannels,
                                                Format format, std::string& error) {
@@ -363,6 +359,7 @@ public:
             return nullptr;
         }
         std::unique_ptr<FfmpegDecoder> d(new FfmpegDecoder());
+        d->path_ = path;
         d->format_ = format;
         ProbeInfo pi = probe(path);
         d->sourceSampleRate_ = pi.sampleRate;
@@ -372,22 +369,17 @@ public:
         d->channels_ = outChannels > 0 ? outChannels : (pi.channels > 0 ? pi.channels : 2);
         if (d->sourceSampleRate_ == 0) d->sourceSampleRate_ = d->sampleRate_;
         if (d->sourceChannels_ == 0) d->sourceChannels_ = d->channels_;
-
-        std::vector<std::string> argv = {"ffmpeg", "-nostdin", "-v", "error", "-i", path, "-f", "s16le",
-                                         "-ac", std::to_string(d->channels_), "-ar", std::to_string(d->sampleRate_), "-"};
-        bool notFound = false;
-        if (!d->child_.start(argv, notFound)) {
-            error = notFound ? "ffmpeg not found on PATH" : "could not spawn ffmpeg";
-            return nullptr;
-        }
-        d->thread_ = std::thread([p = d.get()] { p->pump(); });
+        // A bounded ring, not the whole track: a two-hour mix costs the same memory as a jingle.
+        d->capFrames_ = static_cast<uint64_t>(d->sampleRate_) * kRingSeconds;
+        d->ring_.assign(static_cast<size_t>(d->capFrames_) * static_cast<size_t>(d->channels_), 0);
+        if (!d->startChild(0, error)) return nullptr;
 
         // Wait for the first half second (or EOF) so the audio thread finds data ready.
         const uint64_t want = static_cast<uint64_t>(d->sampleRate_) / 2;
         {
             std::unique_lock<std::mutex> lk(d->m_);
-            d->cv_.wait_for(lk, std::chrono::seconds(10), [&] { return d->finished_ || d->frames() >= want; });
-            if (d->finished_ && d->frames() == 0) {
+            d->cvData_.wait_for(lk, std::chrono::seconds(10), [&] { return d->finished_ || d->buffered_ >= want; });
+            if (d->finished_ && d->buffered_ == 0) {
                 lk.unlock();
                 error = "ffmpeg produced no audio for " + path + (d->exitCode_ == 127 ? " (ffmpeg not found on PATH)" : "");
                 return nullptr;
@@ -405,39 +397,71 @@ public:
 
     uint64_t lengthFrames() const override {
         std::lock_guard<std::mutex> lk(m_);
-        if (finished_) return frames();
+        if (finished_) return cursor_ + buffered_;
         if (probedDuration_ > 0.0) return static_cast<uint64_t>(probedDuration_ * sampleRate_);
         return 0;
     }
 
+    /** Audio thread: copies out what the ring holds; at most a 20 ms wait when the pump is behind. */
     uint64_t read(void* out, uint64_t wanted) override {
         std::unique_lock<std::mutex> lk(m_);
-        if (!finished_ && frames() < cursor_ + wanted) {
-            cv_.wait_for(lk, std::chrono::milliseconds(20), [&] { return finished_ || frames() >= cursor_ + wanted; });
+        if (!finished_ && buffered_ < wanted) {
+            cvData_.wait_for(lk, std::chrono::milliseconds(20), [&] { return finished_ || buffered_ >= wanted; });
         }
-        const uint64_t total = frames();
-        const uint64_t avail = total > cursor_ ? total - cursor_ : 0;
-        const uint64_t n = std::min(avail, wanted);
-        const int16_t* src = pcm_.data() + cursor_ * static_cast<uint64_t>(channels_);
-        const size_t samples = static_cast<size_t>(n) * static_cast<size_t>(channels_);
+        const uint64_t n = std::min(buffered_, wanted);
+        const size_t ch = static_cast<size_t>(channels_);
+        const size_t first = static_cast<size_t>(std::min<uint64_t>(n, capFrames_ - head_));
+        const size_t second = static_cast<size_t>(n) - first;
         if (format_ == Format::S16) {
-            std::memcpy(out, src, samples * sizeof(int16_t));
+            int16_t* dst = static_cast<int16_t*>(out);
+            std::memcpy(dst, ring_.data() + head_ * ch, first * ch * sizeof(int16_t));
+            std::memcpy(dst + first * ch, ring_.data(), second * ch * sizeof(int16_t));
         } else {
             float* dst = static_cast<float*>(out);
-            for (size_t i = 0; i < samples; ++i) dst[i] = static_cast<float>(src[i]) * (1.0f / 32768.0f);
+            const int16_t* a = ring_.data() + head_ * ch;
+            for (size_t i = 0; i < first * ch; ++i) dst[i] = static_cast<float>(a[i]) * (1.0f / 32768.0f);
+            for (size_t i = 0; i < second * ch; ++i) dst[first * ch + i] = static_cast<float>(ring_[i]) * (1.0f / 32768.0f);
         }
+        head_ = (head_ + n) % capFrames_;
+        buffered_ -= n;
         cursor_ += n;
+        lk.unlock();
+        cvSpace_.notify_one();
         return n;
     }
 
     bool atEnd() const override {
         std::lock_guard<std::mutex> lk(m_);
-        return finished_ && cursor_ >= frames();
+        return finished_ && buffered_ == 0;
     }
 
+    /** Within the ring: skip ahead. Anywhere else: restart ffmpeg at the new position (`-ss`). */
     bool seek(uint64_t frame) override {
-        std::lock_guard<std::mutex> lk(m_);
-        cursor_ = finished_ ? std::min(frame, frames()) : frame;
+        {
+            std::unique_lock<std::mutex> lk(m_);
+            if (frame >= cursor_ && frame - cursor_ <= buffered_) {
+                const uint64_t skip = frame - cursor_;
+                head_ = (head_ + skip) % capFrames_;
+                buffered_ -= skip;
+                cursor_ = frame;
+                lk.unlock();
+                cvSpace_.notify_one();
+                return true;
+            }
+            if (finished_ && frame >= cursor_ + buffered_) {
+                head_ = (head_ + buffered_) % capFrames_;
+                cursor_ += buffered_;
+                buffered_ = 0;
+                return true;
+            }
+        }
+        stopChild();
+        std::string err;
+        if (!startChild(frame, err)) {
+            std::lock_guard<std::mutex> lk(m_);
+            finished_ = true;
+            return false;
+        }
         return true;
     }
 
@@ -447,25 +471,76 @@ public:
     }
 
 private:
-    // Frames buffered so far (caller holds m_).
-    uint64_t frames() const { return pcm_.size() / static_cast<size_t>(channels_); }
+    bool startChild(uint64_t frame, std::string& error) {
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            head_ = 0;
+            buffered_ = 0;
+            cursor_ = frame;
+            finished_ = false;
+        }
+        stop_.store(false);
+        std::vector<std::string> argv = {"ffmpeg", "-nostdin", "-v", "error"};
+        if (frame > 0) {
+            char ss[32];
+            std::snprintf(ss, sizeof ss, "%.3f", static_cast<double>(frame) / static_cast<double>(sampleRate_));
+            argv.push_back("-ss");
+            argv.push_back(ss);
+        }
+        argv.insert(argv.end(), {"-i", path_, "-f", "s16le", "-ac", std::to_string(channels_), "-ar", std::to_string(sampleRate_), "-"});
+        bool notFound = false;
+        if (!child_.start(argv, notFound)) {
+            error = notFound ? "ffmpeg not found on PATH" : "could not spawn ffmpeg";
+            return false;
+        }
+        reaped_.store(false);
+        thread_ = std::thread([this] { pump(); });
+        return true;
+    }
 
+    void stopChild() {
+        stop_.store(true);
+        cvSpace_.notify_all();
+        if (!reaped_.load()) child_.kill();
+        if (thread_.joinable()) thread_.join();
+    }
+
+    /** Pump thread: ffmpeg's stdout into the ring, sleeping whenever the ring is full. */
     void pump() {
-        std::vector<int16_t> chunk(static_cast<size_t>(16384) * static_cast<size_t>(channels_));
-        size_t carry = 0; // bytes of a partial sample left from the previous read
+        const size_t ch = static_cast<size_t>(channels_);
+        const size_t frameBytes = sizeof(int16_t) * ch;
+        std::vector<int16_t> chunk(static_cast<size_t>(16384) * ch);
+        size_t carry = 0; // bytes of a partial frame left from the previous read
         unsigned char* bytes = reinterpret_cast<unsigned char*>(chunk.data());
         const size_t cap = chunk.size() * sizeof(int16_t);
         while (!stop_.load()) {
             long n = child_.read(bytes + carry, cap - carry);
             if (n <= 0) break;
             const size_t have = carry + static_cast<size_t>(n);
-            const size_t frameBytes = sizeof(int16_t) * static_cast<size_t>(channels_);
             const size_t whole = have - have % frameBytes;
+            uint64_t frames = whole / frameBytes;
+            size_t offset = 0;
             {
-                std::lock_guard<std::mutex> lk(m_);
-                pcm_.insert(pcm_.end(), chunk.data(), chunk.data() + whole / sizeof(int16_t));
+                std::unique_lock<std::mutex> lk(m_);
+                while (frames > 0 && !stop_.load()) {
+                    cvSpace_.wait(lk, [&] { return stop_.load() || buffered_ < capFrames_; });
+                    if (stop_.load()) break;
+                    const uint64_t room = capFrames_ - buffered_;
+                    const uint64_t take = std::min(room, frames);
+                    const uint64_t tail = (head_ + buffered_) % capFrames_;
+                    const size_t first = static_cast<size_t>(std::min<uint64_t>(take, capFrames_ - tail));
+                    const size_t second = static_cast<size_t>(take) - first;
+                    std::memcpy(ring_.data() + tail * ch, chunk.data() + offset * ch, first * ch * sizeof(int16_t));
+                    std::memcpy(ring_.data(), chunk.data() + (offset + first) * ch, second * ch * sizeof(int16_t));
+                    buffered_ += take;
+                    offset += static_cast<size_t>(take);
+                    frames -= take;
+                    lk.unlock();
+                    cvData_.notify_all();
+                    lk.lock();
+                }
             }
-            cv_.notify_all();
+            if (stop_.load()) break;
             carry = have - whole;
             if (carry) std::memmove(bytes, bytes + whole, carry);
         }
@@ -476,9 +551,12 @@ private:
             std::lock_guard<std::mutex> lk(m_);
             finished_ = true;
         }
-        cv_.notify_all();
+        cvData_.notify_all();
     }
 
+    static constexpr uint64_t kRingSeconds = 30;
+
+    std::string path_;
     Format format_ = Format::S16;
     int sampleRate_ = 0, channels_ = 0, sourceSampleRate_ = 0, sourceChannels_ = 0;
     double probedDuration_ = 0.0;
@@ -488,10 +566,16 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> reaped_{false};
     mutable std::mutex m_;
-    std::condition_variable cv_;
-    std::vector<int16_t> pcm_;
-    bool finished_ = false;
+    std::condition_variable cvData_;
+    std::condition_variable cvSpace_;
+    // Ring of interleaved s16 frames: head_ is the next frame to read, buffered_ how many are waiting,
+    // cursor_ the absolute position of head_ in the track. Capacity capFrames_.
+    std::vector<int16_t> ring_;
+    uint64_t capFrames_ = 0;
+    uint64_t head_ = 0;
+    uint64_t buffered_ = 0;
     uint64_t cursor_ = 0;
+    bool finished_ = false;
 };
 
 } // namespace

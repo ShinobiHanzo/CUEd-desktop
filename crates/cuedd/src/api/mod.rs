@@ -20,7 +20,6 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
-use tower_http::cors::{Any, CorsLayer};
 
 use crate::db::Device;
 use crate::state::{AppState, Origin, Tier};
@@ -140,11 +139,61 @@ fn remote_readable(path: &str) -> bool {
     EXACT.contains(&path) || PREFIX.iter().any(|p| path.starts_with(p)) || path == "/api/auth/challenge"
 }
 
+/// Uploads (a track, a backup blob) may be large; every other route keeps axum's 2 MB.
+const UPLOAD_LIMIT: usize = 4 << 30;
+
+/// The host part of `Host` (or `:authority`), without the port.
+fn host_name(headers: &axum::http::HeaderMap) -> Option<String> {
+    let h = headers.get(header::HOST)?.to_str().ok()?.trim();
+    Some(strip_port(h).to_ascii_lowercase())
+}
+
+fn strip_port(authority: &str) -> &str {
+    if let Some(rest) = authority.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority)
+}
+
+/// `true` when the request was addressed to this machine by a loopback name or address.
+pub fn host_is_loopback(headers: &axum::http::HeaderMap) -> bool {
+    match host_name(headers) {
+        Some(h) => h == "localhost" || h.ends_with(".localhost") || h.parse::<std::net::IpAddr>().map(crate::state::is_loopback).unwrap_or(false),
+        None => false,
+    }
+}
+
+/// `true` for a non-browser client (no `Origin`, no `Sec-Fetch-Site`) or a browser request
+/// from the UI's own origin; `false` for a page on another site poking at localhost.
+pub fn same_site_or_native(headers: &axum::http::HeaderMap) -> bool {
+    if let Some(site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        if !matches!(site, "same-origin" | "none") {
+            return false;
+        }
+    }
+    match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        None => true,
+        Some("null") => false,
+        Some(o) => {
+            let authority = o.split("://").nth(1).unwrap_or("").trim_end_matches('/');
+            let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
+            authority.eq_ignore_ascii_case(host)
+        }
+    }
+}
+
 /// The three tiers: decides who a request is before any handler runs.
 async fn policy(State(s): State<App>, Extension(origin): Extension<Origin>, ConnectInfo(addr): ConnectInfo<SocketAddr>, mut req: Request, next: Next) -> Response {
     let ip = addr.ip();
     let tier = match origin {
-        Origin::Lan if crate::state::is_loopback(ip) => Tier::Admin,
+        // The desktop UI: a loopback peer that also asked for a loopback name (a page a
+        // rebound DNS name points at 127.0.0.1 is not it), and no cross-site browser write.
+        Origin::Lan if crate::state::is_loopback(ip) && host_is_loopback(req.headers()) => {
+            if !same_site_or_native(req.headers()) && !matches!(*req.method(), Method::GET | Method::HEAD) {
+                return ApiError::forbidden("cross-site request to the desktop UI refused").into_response();
+            }
+            Tier::Admin
+        }
         Origin::Lan if crate::state::is_lan(ip) => Tier::Lan,
         _ => Tier::Remote,
     };
@@ -223,11 +272,11 @@ pub fn router(state: App, origin: Origin) -> Router {
         .route("/friends/:pubkey/accept", post(friends::accept))
         // sync / backup
         .route("/sync/manifest", post(sync::manifest))
-        .route("/sync/track/:sha", put(sync::upload).head(sync::have))
+        .route("/sync/track/:sha", put(sync::upload).head(sync::have).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)))
         .route("/sync/status", get(sync::status))
         .route("/backup/snapshot", post(sync::snapshot))
         .route("/backup/snapshots", get(sync::snapshots))
-        .route("/backup/blob/:name", put(sync::put_blob).get(sync::get_blob))
+        .route("/backup/blob/:name", put(sync::put_blob).get(sync::get_blob).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)))
         .route("/backup/blobs", get(sync::blobs))
         // library
         .route("/library", get(library::list))
@@ -260,8 +309,7 @@ pub fn router(state: App, origin: Origin) -> Router {
         .route("/stations/link", get(stations::my_link))
         .route("/stations/listen", get(stations::listen_status).post(stations::listen).delete(stations::stop_listening))
         .route("/relay/stats", get(stations::relay_stats))
-        .route("/funnel", get(funnel))
-        .layer(DefaultBodyLimit::max(4 << 30));
+        .route("/funnel", get(funnel));
 
     Router::new()
         .nest("/api", api)
@@ -278,11 +326,10 @@ pub fn router(state: App, origin: Origin) -> Router {
         .fallback(crate::ui::serve)
         .layer(middleware::from_fn_with_state(state.clone(), policy))
         .layer(Extension(origin))
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .with_state(state)
 }
 
-async fn status(State(s): State<App>) -> ApiResult<Json<serde_json::Value>> {
+async fn status(_u: AnyUser, State(s): State<App>) -> ApiResult<Json<serde_json::Value>> {
     let (tracks, bytes) = s.db.track_count()?;
     let devices = s.db.devices()?;
     let relay = s.relay.stats();
@@ -333,7 +380,7 @@ async fn put_settings(_a: Admin, State(s): State<App>, Json(new): Json<serde_jso
     Ok(Json(updated))
 }
 
-async fn funnel(State(s): State<App>) -> Json<serde_json::Value> {
+async fn funnel(_u: AnyUser, State(s): State<App>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "url": s.funnel_url(), "cert": s.tls_fingerprint, "status": s.funnel_status.snapshot() }))
 }
 
@@ -354,7 +401,7 @@ pub async fn range_file(path: &std::path::Path, mime: &str, range: Option<&Heade
     let stream = tokio_util::io::ReaderStream::with_capacity(file.take(len), 1 << 16);
     let mut resp = Response::builder()
         .status(if range.is_some() { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK })
-        .header(header::CONTENT_TYPE, mime)
+        .header(header::CONTENT_TYPE, HeaderValue::from_str(mime).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")))
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, len);
     if range.is_some() {
@@ -394,5 +441,41 @@ mod tests {
         assert_eq!(parse_range("bytes=0-5000", 1000), Some((0, 999)));
         assert_eq!(parse_range("bytes=1000-", 1000), None);
         assert_eq!(parse_range("items=0-1", 1000), None);
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(), v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn admin_needs_a_loopback_host() {
+        use super::host_is_loopback;
+        assert!(host_is_loopback(&headers(&[("host", "localhost:8770")])));
+        assert!(host_is_loopback(&headers(&[("host", "127.0.0.1:8770")])));
+        assert!(host_is_loopback(&headers(&[("host", "[::1]:8770")])));
+        assert!(host_is_loopback(&headers(&[("host", "LOCALHOST")])));
+        // DNS rebinding: a name that happens to resolve to 127.0.0.1 is not the desktop UI.
+        assert!(!host_is_loopback(&headers(&[("host", "evil.example:8770")])));
+        assert!(!host_is_loopback(&headers(&[("host", "192.168.1.5:8770")])));
+        assert!(!host_is_loopback(&headers(&[])));
+    }
+
+    #[test]
+    fn cross_site_browser_writes_are_refused() {
+        use super::same_site_or_native;
+        // curl, the phone, the Python simulator: no browser headers at all.
+        assert!(same_site_or_native(&headers(&[("host", "localhost:8770")])));
+        // The UI's own fetch.
+        assert!(same_site_or_native(&headers(&[("host", "localhost:8770"), ("origin", "http://localhost:8770"), ("sec-fetch-site", "same-origin")])));
+        assert!(same_site_or_native(&headers(&[("host", "127.0.0.1:8770"), ("origin", "http://127.0.0.1:8770")])));
+        // A page on another site poking at localhost.
+        assert!(!same_site_or_native(&headers(&[("host", "localhost:8770"), ("origin", "https://evil.example"), ("sec-fetch-site", "cross-site")])));
+        assert!(!same_site_or_native(&headers(&[("host", "localhost:8770"), ("origin", "https://evil.example")])));
+        assert!(!same_site_or_native(&headers(&[("host", "localhost:8770"), ("origin", "null")])));
+        assert!(!same_site_or_native(&headers(&[("host", "localhost:8770"), ("sec-fetch-site", "cross-site")])));
     }
 }

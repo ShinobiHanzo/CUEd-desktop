@@ -252,7 +252,7 @@ impl AppState {
     pub fn new_challenge(&self, device: &str) -> String {
         let c = cued_proto::bio::new_challenge();
         let mut m = self.challenges.lock().unwrap_or_else(|p| p.into_inner());
-        m.retain(|_, ch| ch.issued.elapsed() < ASSERTION_TTL);
+        m.retain(|_, ch| ch.issued.elapsed() < CHALLENGE_TTL);
         m.insert(c.clone(), Challenge { device: device.into(), issued: Instant::now() });
         c
     }
@@ -272,12 +272,14 @@ impl AppState {
         let Some((challenge, sig)) = assertion.split_once('.') else { return false };
         let live = {
             let mut m = self.challenges.lock().unwrap_or_else(|p| p.into_inner());
-            m.retain(|_, ch| ch.issued.elapsed() < ASSERTION_TTL);
+            m.retain(|_, ch| ch.issued.elapsed() < CHALLENGE_TTL);
             m.get(challenge).map(|ch| ch.device == device.id).unwrap_or(false)
         };
         if !live || !cued_proto::bio::verify(&device.biokey, &device.id, challenge, sig) {
             return false;
         }
+        // One challenge, one assertion: the signed string is what lives on for ASSERTION_TTL.
+        self.challenges.lock().unwrap_or_else(|p| p.into_inner()).remove(challenge);
         self.assertions.lock().unwrap_or_else(|p| p.into_inner()).insert(assertion.to_string(), (device.id.clone(), Instant::now()));
         true
     }
@@ -310,6 +312,8 @@ const PAIR_TTL: Duration = Duration::from_secs(600);
 const SHARE_TTL: Duration = Duration::from_secs(1800);
 /// Challenges and the assertions signed over them are good for this long.
 const ASSERTION_TTL: Duration = Duration::from_secs(600);
+/// A challenge must be signed within this window (the phone's biometric prompt is on screen).
+const CHALLENGE_TTL: Duration = Duration::from_secs(120);
 
 pub fn token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))

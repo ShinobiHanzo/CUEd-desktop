@@ -22,9 +22,20 @@ pub fn load_or_create(path: &Path) -> anyhow::Result<Identity> {
 
 pub fn save(path: &Path, id: &Identity) -> anyhow::Result<()> {
     let body = serde_json::to_vec_pretty(&Stored { secret_hex: id.secret_hex() })?;
-    std::fs::write(path, body)?;
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(&body)?;
+    f.sync_all()?;
+    #[cfg(unix)]
+    {
+        // An existing file keeps its old mode through OpenOptions; tighten it too.
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }

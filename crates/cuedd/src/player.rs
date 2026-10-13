@@ -59,7 +59,8 @@ impl Player {
         } else {
             None
         };
-        let headless = std::env::var("CUED_AUDIO_NULL").is_ok();
+        // Null output (forced by CUED_AUDIO_NULL, or because no sound device opened): the daemon ticks the clock.
+        let headless = engine.as_ref().map(|e| !e.has_device()).unwrap_or(true);
         let p = Self { engine, inner: Mutex::new(Inner { current: None, queue: vec![], volume: 1.0, generation: 0 }), crossfade: Mutex::new((crossfade_secs, curve)), headless };
         p.set_crossfade(crossfade_secs, curve);
         p

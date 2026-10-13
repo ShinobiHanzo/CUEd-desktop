@@ -132,7 +132,8 @@
   <section id="tab-downloads" class="tab">
     <div class="card">
       <h2>Companion downloads</h2>
-      <p class="muted">The phone's Downloads → Backend → Companion (LAN) takes this desktop's address as is. Jobs run in the Python worker with spotdl and land in the library.</p>
+      <p class="muted">The phone's Downloads → Backend → Companion (LAN) takes this desktop's address as is. Jobs run in the Python worker with spotdl and land in the library. A paired phone sends its token; anything else on the Wi-Fi is refused unless you allow it here.</p>
+      <label class="check"><input type="checkbox" id="companion-open"> Let unpaired devices on this Wi-Fi use the downloader</label>
       <div id="companion" class="kv"></div>
       <form id="job-form" class="row"><input id="job-url" placeholder="Spotify / YouTube link or a search" required><button class="primary">Download here</button></form>
       <div id="jobs" class="list"></div>

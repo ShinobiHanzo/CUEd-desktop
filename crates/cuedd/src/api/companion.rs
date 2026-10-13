@@ -2,12 +2,32 @@
 //! phone's Downloads → Companion (LAN) setting takes `http://<desktop>:8770`.
 
 use axum::body::Body;
-use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::extract::{FromRequestParts, Path, State};
+use axum::http::{header, request::Parts, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
-use super::{ApiError, ApiResult, App};
+use super::{AnyUser, ApiError, ApiResult, App};
+use crate::state::Tier;
+
+/// Who may use the downloader: the desktop UI, a paired phone, or (only when the
+/// *companion_open_lan* setting is on) any device on the LAN, as before 0.2.4.
+pub struct CompanionUser;
+
+#[axum::async_trait]
+impl FromRequestParts<App> for CompanionUser {
+    type Rejection = ApiError;
+    async fn from_request_parts(parts: &mut Parts, state: &App) -> Result<Self, Self::Rejection> {
+        if AnyUser::from_request_parts(parts, state).await.is_ok() {
+            return Ok(CompanionUser);
+        }
+        let tier = parts.extensions.get::<Tier>().copied().unwrap_or(Tier::Remote);
+        if tier == Tier::Lan && state.settings().companion_open_lan {
+            return Ok(CompanionUser);
+        }
+        Err(ApiError(StatusCode::UNAUTHORIZED, "pair this phone with the desktop first (Desktop → Scan), or allow unpaired devices in the desktop UI's Downloads tab".into()))
+    }
+}
 
 fn base(s: &App) -> ApiResult<String> {
     let c = s.companion.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -41,7 +61,7 @@ pub async fn health(State(s): State<App>) -> Response {
     }
 }
 
-pub async fn create_job(State(s): State<App>, body: String) -> ApiResult<Response> {
+pub async fn create_job(_u: CompanionUser, State(s): State<App>, body: String) -> ApiResult<Response> {
     let b = base(&s)?;
     let mut v: serde_json::Value = serde_json::from_str(&body).map_err(|_| ApiError::bad("bad json"))?;
     if v.get("format").and_then(|f| f.as_str()).map(|f| f.is_empty()).unwrap_or(true) {
@@ -51,25 +71,25 @@ pub async fn create_job(State(s): State<App>, body: String) -> ApiResult<Respons
     Ok(passthrough(&s, r).await)
 }
 
-pub async fn list_jobs(State(s): State<App>) -> ApiResult<Response> {
+pub async fn list_jobs(_u: CompanionUser, State(s): State<App>) -> ApiResult<Response> {
     let b = base(&s)?;
     let r = s.http.get(format!("{b}/jobs")).send().await.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(passthrough(&s, r).await)
 }
 
-pub async fn job(State(s): State<App>, Path(id): Path<String>) -> ApiResult<Response> {
+pub async fn job(_u: CompanionUser, State(s): State<App>, Path(id): Path<String>) -> ApiResult<Response> {
     let b = base(&s)?;
     let r = s.http.get(format!("{b}/jobs/{}", urlenc(&id))).send().await.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(passthrough(&s, r).await)
 }
 
-pub async fn delete_job(State(s): State<App>, Path(id): Path<String>) -> ApiResult<Response> {
+pub async fn delete_job(_u: CompanionUser, State(s): State<App>, Path(id): Path<String>) -> ApiResult<Response> {
     let b = base(&s)?;
     let r = s.http.delete(format!("{b}/jobs/{}", urlenc(&id))).send().await.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(passthrough(&s, r).await)
 }
 
-pub async fn file(State(s): State<App>, Path(name): Path<String>) -> ApiResult<Response> {
+pub async fn file(_u: CompanionUser, State(s): State<App>, Path(name): Path<String>) -> ApiResult<Response> {
     let b = base(&s)?;
     let r = s.http.get(format!("{b}/files/{}", urlenc(&name))).send().await.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(passthrough(&s, r).await)

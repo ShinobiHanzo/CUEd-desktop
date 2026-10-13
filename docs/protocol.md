@@ -190,7 +190,7 @@ phone ──TLS──▶ edge :443 ──mux over one TCP control connection─�
 
 See `docs/funnel.md` for setup.
 
-## 6. Companion downloads (unchanged)
+## 6. Companion downloads
 
 `cuedd` serves the companion API from `tools/spotdl-server` on its own port, so
 the phone's Downloads → Backend → **Companion (LAN)** setting takes
@@ -199,11 +199,29 @@ the phone's Downloads → Backend → **Companion (LAN)** setting takes
 which `cuedd` starts and watches; the finished files are also added to the
 desktop library.
 
+Since 0.2.4 everything but `/health` needs a caller the daemon knows: the
+desktop UI, or a paired phone's `Authorization: Bearer <token>` (the phone
+sends the token of the desktop whose LAN address matches the companion URL).
+Anything else on the LAN gets `401` unless the setting `companion_open_lan`
+(*Let unpaired devices on this Wi-Fi use the downloader*, off) is on.
+
 ## 7. Who may do what: the three tiers
 
 Code injection through the API is ruled out by construction: nothing that
 changes state is reachable from outside the LAN, and reads from outside need
 a biometric unlock on the phone every few minutes.
+
+The **admin** tier (the desktop UI) is a loopback peer that also addressed the
+daemon by a loopback name (`Host: localhost` / `127.0.0.1` / `[::1]`), so a
+DNS name an attacker points at `127.0.0.1` does not count. A browser write
+(`POST`/`PUT`/`DELETE`) is refused when `Sec-Fetch-Site` is not
+`same-origin`/`none` or `Origin` differs from `Host`; non-browser clients send
+neither header and are unaffected. The daemon sends no CORS headers: the UI is
+same-origin and no other page may read its answers. Request bodies are capped
+at axum's 2 MB except the two uploads (`PUT /api/sync/track/{sha}`,
+`PUT /api/backup/blob/{name}`, 4 GiB). A biometric challenge lives 120 s and
+is consumed by the first valid assertion; the assertion itself is good for
+10 min.
 
 | Tier | Who | Reaches the desktop how | Allowed |
 |---|---|---|---|

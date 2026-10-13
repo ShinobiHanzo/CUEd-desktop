@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.2.4
+
+Security on the LAN (all three were reachable by any device on the Wi-Fi, or by any web page
+open in the desktop's browser):
+
+- **No more wildcard CORS.** The UI is same-origin; the permissive CORS layer that let any web
+  page read answers from `127.0.0.1:8770` (and so mint itself a pairing token) is gone. The admin
+  tier now also requires the `Host` header to be loopback (DNS rebinding) and refuses cross-site
+  `POST`/`PUT`/`DELETE` by `Origin` / `Sec-Fetch-Site`.
+- **The download worker needs a paired phone's token** (or the desktop UI). CUEd 0.2.6 on the
+  phone sends it when the companion address matches a paired desktop. A new setting, *Let unpaired
+  devices on this Wi-Fi use the downloader* (off), restores the old open behaviour for older phones
+  and other clients.
+- **Body limits.** The 4 GiB request limit applies to the two upload routes only; every JSON route
+  is back to axum's 2 MB, so one unauthenticated request can no longer exhaust memory.
+- `/api/status` and `/api/funnel` need the UI or a token; a biometric challenge lives 120 s and is
+  consumed by its first valid assertion; the private key file is created `0600` from the first
+  byte.
+
+Fixes and platforms:
+
+- **ffmpeg fallback decoder:** a 30-second ring buffer instead of the whole decoded track in
+  memory (a two-hour mix used to cost about 1.4 GB and stall the audio thread); seeks outside the
+  ring restart ffmpeg with `-ss`.
+- **Headless boxes:** when no sound device opens, the player now knows it (position advances, the
+  station host's clock moves) instead of needing `CUED_AUDIO_NULL`.
+- **Hostname on macOS** (and anywhere without `/etc/hostname`) via the `hostname` command, so a
+  Mac no longer pairs as "CUEd desktop".
+- **Release archives for six targets:** Linux x86_64 and arm64 (built on Ubuntu 22.04 for a low
+  glibc floor; Raspberry Pi OS bookworm included), macOS arm64 and x86_64, Windows x86_64 and
+  arm64. Only Linux x86_64 has been exercised end to end.
+
 ## 0.2.3
 
 - Windows: the ffmpeg fallback decoder spawned its child with fork/exec and `sys/wait.h`, so the

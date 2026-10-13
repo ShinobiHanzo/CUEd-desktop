@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "cued-audio"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "cc",
  "serde",
@@ -398,7 +398,7 @@ dependencies = [
 
 [[package]]
 name = "cued-funnel"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -420,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "cued-proto"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "base64 0.22.1",
  "bech32",
@@ -438,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "cued-relay"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "cued-proto",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "cuedd"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "axum",
