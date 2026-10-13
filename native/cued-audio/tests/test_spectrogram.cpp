@@ -1,6 +1,7 @@
 // Port of FftTest.`spectrogram of silence is zero and of noise is not` and
 // StreamingSpectrogramTest, plus band-edge checks.
 #include <algorithm>
+#include <cstddef>
 #include <vector>
 
 #include "spectrogram.h"

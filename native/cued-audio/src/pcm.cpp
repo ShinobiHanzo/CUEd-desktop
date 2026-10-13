@@ -1,4 +1,5 @@
 #include "pcm.h"
+#include <cstddef>
 
 namespace cued {
 namespace pcm {

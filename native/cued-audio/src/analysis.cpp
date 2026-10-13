@@ -1,4 +1,5 @@
 #include "analysis.h"
+#include <cstddef>
 
 #include <algorithm>
 #include <cstdint>

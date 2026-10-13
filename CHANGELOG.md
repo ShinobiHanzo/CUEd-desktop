@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.5
+
+- Linux builds: the 0.2.4 archives for Linux x86_64 and arm64 never appeared because GCC 11 on
+  Ubuntu 22.04 (the new, lower glibc build base) wants `<cstddef>` included explicitly wherever
+  `size_t` is used; it is now. No other change: everything listed under 0.2.4 applies.
+
 ## 0.2.4
 
 Security on the LAN (all three were reachable by any device on the Wi-Fi, or by any web page

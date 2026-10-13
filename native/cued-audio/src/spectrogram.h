@@ -4,6 +4,7 @@
 #pragma once
 
 #include <functional>
+#include <cstddef>
 #include <vector>
 
 #include "fft.h"

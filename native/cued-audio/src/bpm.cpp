@@ -1,4 +1,5 @@
 #include "bpm.h"
+#include <cstddef>
 
 #include <algorithm>
 #include <cmath>
