@@ -6,6 +6,7 @@ pub mod companion;
 pub mod friends;
 pub mod library;
 pub mod pair;
+pub mod party;
 pub mod player;
 pub mod stations;
 pub mod sync;
@@ -300,6 +301,11 @@ pub fn router(state: App, origin: Origin) -> Router {
         .route("/player/queue", get(player::queue).post(player::enqueue).delete(player::clear_queue))
         .route("/player/next", post(player::next))
         .route("/player/spectrum", get(player::spectrum))
+        .route("/player/karaoke", post(player::karaoke))
+        // shared queue (friends on the LAN) and the listening ledger
+        .route("/party", post(party::party))
+        .route("/ledger", get(party::ledger).delete(party::clear))
+        .route("/ledger/export", get(party::export))
         // stations
         .route("/identity", get(stations::identity))
         .route("/stations/follows", get(stations::follows).post(stations::follow))
@@ -375,6 +381,7 @@ async fn put_settings(_a: Admin, State(s): State<App>, Json(new): Json<serde_jso
         cur.upstream_relays.retain(|r| r.starts_with("wss://") || r.starts_with("ws://"));
         cur.crossfade_seconds = cur.crossfade_seconds.clamp(0.0, 20.0);
         cur.crossfade_curve = cur.crossfade_curve.min(2);
+        cur.karaoke_strength = if cur.karaoke_strength.is_nan() { 1.0 } else { cur.karaoke_strength.clamp(0.0, 1.0) };
     })?;
     s.stations.poke();
     Ok(Json(updated))

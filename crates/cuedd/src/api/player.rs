@@ -57,6 +57,21 @@ pub async fn volume(_a: Admin, State(s): State<App>, Json(b): Json<VolumeBody>) 
     Json(s.player.status())
 }
 
+#[derive(serde::Deserialize)]
+pub struct KaraokeBody {
+    pub on: bool,
+    pub strength: Option<f32>,
+}
+/// Karaoke switch; also persisted in settings so it survives a restart.
+pub async fn karaoke(_a: Admin, State(s): State<App>, Json(b): Json<KaraokeBody>) -> ApiResult<Json<serde_json::Value>> {
+    let strength = b.strength.unwrap_or_else(|| s.player.karaoke().1);
+    s.update_settings(|cur| {
+        cur.karaoke = b.on;
+        cur.karaoke_strength = strength.clamp(0.0, 1.0);
+    })?;
+    Ok(Json(s.player.status()))
+}
+
 pub async fn queue(_a: Admin, State(s): State<App>) -> Json<Vec<crate::player::QueueItem>> {
     Json(s.player.queue())
 }

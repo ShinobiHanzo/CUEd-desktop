@@ -24,6 +24,16 @@ pub struct Settings {
     pub station_name: String,
     /// Let devices on the LAN that are not paired use the companion downloader (pre-0.2.4 behaviour).
     pub companion_open_lan: bool,
+    /// Karaoke: cancel the centre (lead vocal) of what plays, keeping its bass.
+    pub karaoke: bool,
+    /// 0..1, how much of the centre to remove.
+    pub karaoke_strength: f32,
+    /// Host a shared queue: friends on the Wi-Fi may search and queue (`docs/protocol.md` §13).
+    pub party_enabled: bool,
+    /// Guests may also skip, pause and resume, not only queue.
+    pub party_controls: bool,
+    /// Keep the listening ledger (plays table). Off stops recording; existing rows stay until cleared.
+    pub ledger: bool,
 }
 
 impl Default for Settings {
@@ -38,6 +48,11 @@ impl Default for Settings {
             companion_format: "m4a".into(),
             station_name: String::new(),
             companion_open_lan: false,
+            karaoke: false,
+            karaoke_strength: 1.0,
+            party_enabled: false,
+            party_controls: true,
+            ledger: true,
         }
     }
 }

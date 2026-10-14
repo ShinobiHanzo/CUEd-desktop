@@ -63,6 +63,7 @@ mod ffi {
         pub fn cued_engine_seek(e: *mut cued_engine, seconds: c_double) -> c_int;
         pub fn cued_engine_set_crossfade(e: *mut cued_engine, seconds: c_double, curve: c_int);
         pub fn cued_engine_set_volume(e: *mut cued_engine, v01: c_float);
+        pub fn cued_engine_set_karaoke(e: *mut cued_engine, on: c_int, strength: c_float);
         pub fn cued_engine_status(e: *mut cued_engine, out: *mut cued_status);
         pub fn cued_engine_spectrum(e: *mut cued_engine, out: *mut c_float, max_bands: c_int) -> c_int;
         pub fn cued_engine_tick(e: *mut cued_engine, frames: c_int);
@@ -270,6 +271,12 @@ impl Engine {
     pub fn set_volume(&self, v01: f32) {
         // SAFETY: valid handle.
         unsafe { ffi::cued_engine_set_volume(self.raw(), v01) }
+    }
+
+    /// Karaoke: cancels the centre of the mix (the lead vocal) while keeping its bass; `strength` 0..1.
+    pub fn set_karaoke(&self, on: bool, strength: f32) {
+        // SAFETY: valid handle.
+        unsafe { ffi::cued_engine_set_karaoke(self.raw(), on as c_int, strength) }
     }
 
     pub fn status(&self) -> Status {

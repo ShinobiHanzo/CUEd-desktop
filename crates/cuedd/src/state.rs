@@ -77,6 +77,8 @@ pub enum UiEvent {
     Shared,
     Account,
     Listen,
+    /// A party guest did something to the queue.
+    Party { who: String, what: String },
     #[allow(dead_code)]
     Notice { text: String },
 }
@@ -95,6 +97,8 @@ pub struct AppState {
     pub recent_pair_secrets: Mutex<HashMap<String, (String, Instant)>>,
     pub share_caps: Mutex<HashMap<String, ShareCap>>,
     pub challenges: Mutex<HashMap<String, Challenge>>,
+    /// Party request nonces seen lately (replay protection).
+    pub party_nonces: Mutex<crate::party::NonceCache>,
     /// Verified assertions: `<challenge>.<sig>` → (device, verified at).
     pub assertions: Mutex<HashMap<String, (String, Instant)>>,
     pub listen: crate::listen::ListenShared,
@@ -123,6 +127,7 @@ impl AppState {
         info!("account {} ({}), chain height {}", account.identity().npub(), account.chain().name(), account.chain().height());
         let relay = cued_relay::Relay::open(Some(&o.data_dir.join("relay.db"))).context("opening relay store")?;
         let player = Player::new(!o.no_audio, settings.crossfade_seconds, settings.crossfade_curve);
+        player.set_karaoke(settings.karaoke, settings.karaoke_strength);
         let (events, _) = broadcast::channel(256);
 
         let (tls_config, tls_fingerprint) = if o.funnel_enabled {
@@ -150,6 +155,7 @@ impl AppState {
             recent_pair_secrets: Mutex::new(HashMap::new()),
             share_caps: Mutex::new(HashMap::new()),
             challenges: Mutex::new(HashMap::new()),
+            party_nonces: Mutex::new(Default::default()),
             assertions: Mutex::new(HashMap::new()),
             listen: Default::default(),
             events,
@@ -191,6 +197,7 @@ impl AppState {
         f(&mut s);
         s.save(&self.data_dir.join("settings.json"))?;
         self.player.set_crossfade(s.crossfade_seconds, s.crossfade_curve);
+        self.player.set_karaoke(s.karaoke, s.karaoke_strength);
         Ok(s.clone())
     }
 

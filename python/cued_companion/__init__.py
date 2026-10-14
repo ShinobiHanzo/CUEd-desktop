@@ -17,4 +17,4 @@ Standard library only at runtime; ``websockets`` is imported lazily by the
 station publisher and is optional.
 """
 
-__version__ = "0.2.5"
+__version__ = "0.3.0"

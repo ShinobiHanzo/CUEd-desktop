@@ -185,6 +185,14 @@ void Engine::setVolume(float v) {
     volume_ = std::min(std::max(v, 0.0f), 1.0f);
 }
 
+void Engine::setKaraoke(bool on, float strength) {
+    std::lock_guard<std::mutex> lk(m_);
+    karaoke_.setSampleRate(sampleRate_);
+    karaoke_.setStrength(strength);
+    if (on && !karaokeOn_) karaoke_.reset();
+    karaokeOn_ = on;
+}
+
 EngineStatus Engine::status() {
     std::lock_guard<std::mutex> lk(m_);
     EngineStatus s;
@@ -268,6 +276,7 @@ void Engine::mix(float* out, int frames) {
         std::memcpy(out, bufA_.data(), samples * sizeof(float));
         if (a.finished) playing_ = false; // end of track: stop here
     }
+    if (karaokeOn_) karaoke_.process(out, frames);
     feedSpectrum(out, frames);
     if (volume_ != 1.0f) {
         for (size_t i = 0; i < samples; ++i) out[i] *= volume_;

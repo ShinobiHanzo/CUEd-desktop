@@ -16,6 +16,7 @@
     <button data-tab="backup">Backup</button>
     <button data-tab="stations">Stations</button>
     <button data-tab="friends">Friends</button>
+    <button data-tab="ledger">Ledger</button>
     <button data-tab="relay">Relay &amp; funnel</button>
     <button data-tab="downloads">Downloads</button>
     <button data-tab="settings">Settings</button>
@@ -105,6 +106,34 @@
         <p class="muted small">Friends are followed as stations automatically. "Listen" plays along with what a friend is playing right now; it needs their <em>friend streaming</em> switch to be on.</p>
       </div>
     </div>
+    <div class="card">
+      <h2>Party: a shared queue <span id="party-badge" class="badge">off</span></h2>
+      <p class="muted">Friends on this Wi-Fi open CUEd → Party, find this desktop, and search your library to add songs to the queue. Every request is signed with their key; only people in your friends list get through. Nothing leaves the LAN.</p>
+      <label class="check"><input type="checkbox" id="party-enabled"> Host a party</label>
+      <label class="check"><input type="checkbox" id="party-controls"> Guests may skip, pause and resume (not only queue)</label>
+      <div id="party-log" class="list"></div>
+    </div>
+  </section>
+
+  <section id="tab-ledger" class="tab">
+    <div class="card">
+      <h2>Your listening ledger</h2>
+      <p class="muted">Every play this desktop makes, counted here and nowhere else. Pick a period; export the raw log as a file you own.</p>
+      <div class="row tight">
+        <select id="ledger-period"><option value="month">This month</option><option value="last-month">Last month</option><option value="30d">Last 30 days</option><option value="7d">Last 7 days</option><option value="year">This year</option><option value="all">All time</option></select>
+        <a id="ledger-export" class="btn" href="/api/ledger/export?period=month" download="cued-ledger.json">Export JSON</a>
+        <span class="grow"></span>
+        <label class="check"><input type="checkbox" id="ledger-enabled"> Keep recording</label>
+        <button id="ledger-clear" class="danger">Forget everything</button>
+      </div>
+      <div id="ledger-tiles" class="tiles"></div>
+    </div>
+    <div class="cols">
+      <div class="card"><h2>By hour of day</h2><div id="ledger-hours" class="bars"></div><h2 class="spaced">By weekday</h2><div id="ledger-weekdays" class="bars"></div></div>
+      <div class="card"><h2>Top artists</h2><div id="ledger-artists" class="list"></div></div>
+      <div class="card"><h2>Top tracks</h2><div id="ledger-tracks" class="list"></div></div>
+      <div class="card"><h2>Top albums</h2><div id="ledger-albums" class="list"></div><h2 class="spaced">Top genres</h2><div id="ledger-genres" class="list"></div></div>
+    </div>
   </section>
 
   <section id="tab-relay" class="tab">
@@ -157,6 +186,7 @@
               <label>Crossfade seconds <input name="crossfade_seconds" type="number" min="0" max="20" step="0.5"></label>
               <label>Crossfade curve <select name="crossfade_curve"><option value="0">Equal power</option><option value="1">Linear</option><option value="2">Smooth step</option></select></label>
               <label>Companion format <select name="companion_format"><option>m4a</option><option>mp3</option><option>opus</option><option>flac</option></select></label>
+              <label>Karaoke strength <input name="karaoke_strength" type="number" min="0" max="1" step="0.1"></label>
               <button class="primary">Save</button>
             </form>
             <div id="about" class="kv"></div>
@@ -215,6 +245,7 @@
   <div class="shade"></div>
   <canvas id="spectrum" width="150" height="60"></canvas>
   <div class="mini-top">
+    <button id="mini-karaoke" class="mini-btn" title="Karaoke: cut the lead vocal"><i>K</i></button>
     <button id="mini-lyrics" class="mini-btn" title="Lyrics"><i>L</i></button>
     <button id="mini-close" class="mini-btn" title="Hide the player">×</button>
   </div>

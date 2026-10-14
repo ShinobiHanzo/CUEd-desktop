@@ -129,6 +129,10 @@ impl Db {
                 updated_at INTEGER NOT NULL, PRIMARY KEY(device_id, name));
             CREATE TABLE IF NOT EXISTS follows(pubkey TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', relays TEXT NOT NULL DEFAULT '[]', added_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS friends(pubkey TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, relays TEXT NOT NULL DEFAULT '[]', added_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS plays(id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL, started_at INTEGER NOT NULL, listened_ms INTEGER NOT NULL,
+                completed INTEGER NOT NULL, source TEXT NOT NULL DEFAULT 'desktop');
+            CREATE INDEX IF NOT EXISTS plays_started ON plays(started_at);
+            CREATE INDEX IF NOT EXISTS plays_sha ON plays(sha256);
             "#,
         )?;
         for col in ["biokey TEXT NOT NULL DEFAULT ''", "devhash TEXT NOT NULL DEFAULT ''"] {
@@ -412,6 +416,65 @@ impl Db {
 
 fn row_device(r: &rusqlite::Row) -> rusqlite::Result<Device> {
     Ok(Device { id: r.get(0)?, name: r.get(1)?, pubkey: r.get(2)?, paired_at: r.get(3)?, last_seen: r.get(4)?, last_manifest: r.get(5)?, last_upload: r.get(6)?, biokey: r.get(7)?, devhash: r.get(8)? })
+}
+
+/// One row of the listening ledger, joined with what the library knows about the track.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlayRow {
+    pub sha256: String,
+    #[serde(rename = "startedAt")]
+    pub started_at: i64,
+    #[serde(rename = "listenedMs")]
+    pub listened_ms: i64,
+    pub completed: bool,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    #[serde(rename = "durationMs")]
+    pub duration_ms: i64,
+    pub genres: Vec<String>,
+}
+
+impl Db {
+    // ---- listening ledger ----
+
+    pub fn record_play(&self, sha256: &str, started_at: i64, listened_ms: i64, completed: bool) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute("INSERT INTO plays(sha256,started_at,listened_ms,completed,source) VALUES(?1,?2,?3,?4,'desktop')", params![sha256, started_at, listened_ms, completed as i64])?;
+            Ok(())
+        })
+    }
+
+    /// Every play, oldest first, with the track's current metadata (a track deleted since keeps its hash and a blank title).
+    pub fn plays_all(&self) -> anyhow::Result<Vec<PlayRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT p.sha256, p.started_at, p.listened_ms, p.completed, COALESCE(t.title,''), COALESCE(t.artist,''), COALESCE(t.album,''), COALESCE(t.duration_ms,0), COALESCE(t.genres,'[]')
+                 FROM plays p LEFT JOIN tracks t ON t.sha256 = p.sha256 ORDER BY p.started_at",
+            )?;
+            let rows = st.query_map([], |r| {
+                Ok(PlayRow {
+                    sha256: r.get(0)?,
+                    started_at: r.get(1)?,
+                    listened_ms: r.get(2)?,
+                    completed: r.get::<_, i64>(3)? != 0,
+                    title: r.get(4)?,
+                    artist: r.get(5)?,
+                    album: r.get(6)?,
+                    duration_ms: r.get(7)?,
+                    genres: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    pub fn plays_clear(&self, before: Option<i64>) -> anyhow::Result<usize> {
+        self.with(|c| match before {
+            Some(b) => c.execute("DELETE FROM plays WHERE started_at < ?1", params![b]),
+            None => c.execute("DELETE FROM plays", []),
+        })
+    }
 }
 
 fn row_friend(r: &rusqlite::Row) -> rusqlite::Result<Friend> {

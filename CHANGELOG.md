@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0
+
+Three things Spotify does not do, all local:
+
+- **Listening ledger** (new *Ledger* tab): plays, listening time, discoveries, streaks, hour-of-day and
+  weekday shapes, top artists / tracks / albums / genres, for this month, last month, 7 or 30 days, the
+  year or all time. Computed on the box from a `plays` table the player fills; export the raw log as a
+  `cued-ledger/1` JSON file you own, or forget it with one click. The `ledger` setting stops recording.
+- **Party: a shared queue for friends.** Friends on the Wi-Fi find this desktop through a UDP beacon
+  (8772), then search the library and queue songs, each request signed with their station key; only
+  people in the friends list get through (protocol §13). *Guests may skip, pause and resume* is a second
+  switch. The Friends tab shows who queued what, live. `python -m cued_companion.party` is a
+  command-line guest.
+- **Karaoke** (K on the mini player, strength in Settings): cancels the centre of the mix, the lead
+  vocal, while keeping the bass; two-stage filter so a 1 kHz voice leaks at -32 dB, not -16. Works on
+  stereo mixes with centred vocals; wide-panned backing vocals survive, mono files go quiet.
+
 ## 0.2.5
 
 - Linux builds: the 0.2.4 archives for Linux x86_64 and arm64 never appeared because GCC 11 on

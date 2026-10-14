@@ -87,6 +87,8 @@ int  cued_engine_seek(cued_engine*, double seconds);
 void cued_engine_set_crossfade(cued_engine*, double seconds, int curve);
 /* Master volume, 0..1 (clamped). Applied after the mix; the spectrum is pre-volume. */
 void cued_engine_set_volume(cued_engine*, float v01);
+/* Karaoke: cancel the centre (lead vocal) of the mixed output, keeping its bass. strength 0..1. */
+void cued_engine_set_karaoke(cued_engine*, int on, float strength);
 void cued_engine_status(cued_engine*, cued_status* out);
 /* Latest 64-band spectrum (0..1) of what is being output; returns bands written. */
 int  cued_engine_spectrum(cued_engine*, float* out, int max_bands);

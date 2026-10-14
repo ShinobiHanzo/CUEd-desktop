@@ -9,8 +9,10 @@ mod db;
 mod friends;
 mod account;
 mod identity;
+mod ledger;
 mod listen;
 mod net;
+mod party;
 mod player;
 mod probe;
 mod relay_ws;
@@ -108,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Background services.
     stations::spawn(state.clone(), shutdown.clone());
+    party::spawn_beacon(state.clone(), shutdown.clone());
     if !args.no_companion {
         companion::spawn(state.clone(), shutdown.clone());
     }

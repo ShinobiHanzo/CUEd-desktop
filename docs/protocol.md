@@ -406,3 +406,54 @@ nothing is mirrored; turning it on from any device turns it on everywhere.
   tracks you are playing now and next.
 - Nothing calls home. Upstream relays are the ones you listed, and the
   desktop's own relay stays off until you switch it on.
+
+## 13. Party: a shared queue for friends on the LAN
+
+A host (desktop or phone) lets friends on the same Wi-Fi, or within Bluetooth
+range of a phone, search its library and add to its queue. No account, no
+server: every message is a signed envelope, and the host only serves public
+keys in its friends list (§9, status `friends`).
+
+```json
+{"v":1,"pubkey":"<x-only hex>","ts":1700000000,"nonce":"<8 random bytes, hex>",
+ "op":"hello|search|queue|now|skip|pause|play","arg":{…},"ok":true,"sig":"<BIP-340, hex>"}
+```
+
+- **Signature** over `taggedHash("CUEd/party", "cued-party|v|pubkey|ts|nonce|op|ok(1/0)|canonical(arg)")`,
+  where `canonical` is JSON with keys sorted and no whitespace (`"null"` for a
+  missing `arg`). The host checks: signature, `|now − ts| ≤ 90 s`, the nonce
+  not seen in the last 3 minutes (replay), and the pubkey being an accepted
+  friend. A reply is an envelope too, signed by the host, echoing the request's
+  `op` and `nonce`; `ok:false` carries `{"error":"…"}` in `arg`. The guest
+  checks the reply's signature against the host pubkey it is talking to, and
+  that pubkey must be one of *its* friends: both sides vouch.
+- **Ops.** `hello` → `{name, pubkey, controls, now}`; `search {q}` → up to 12
+  `{sha256|id, title, artist, album, durationMs}`; `queue {sha256|id}` →
+  `{queued, queueLength}` (starts playing when nothing is); `now` →
+  `{current, positionMs, playing, queue[≤10], queueLength}`; `skip`, `pause`,
+  `play` only when the host's *guests may control playback* switch is on.
+- **Transports.** HTTP `POST /api/party` on the desktop (LAN tier, no bearer:
+  the envelope is the credential; remote callers get 403) and `POST /party` on
+  a phone's share server; bodies are capped at 8 KB. Over Bluetooth LE
+  (phones only) the same JSON goes through GATT service
+  `7a2e0c0e-9a6b-4c57-8c3f-00c0ed0ac0d1`: the guest writes request frames to
+  `…c0d2`, the host notifies reply frames on `…c0d3`, each frame
+  `[index:1][total:1][payload]`.
+- **Discovery.** UDP port 8772: a guest broadcasts `CUED-PARTY?`; every host
+  with a party on answers `CUED-PARTY {"name":"…","pubkey":"…","url":"http://ip:port"}`
+  (only to LAN addresses). BLE hosts advertise the service UUID.
+- **Settings.** Desktop: `party_enabled` (off), `party_controls` (on) in
+  `/api/settings`. Phone: the Party screen's host switch.
+- `python -m cued_companion.party` is a command-line guest for testing.
+
+## 14. The listening ledger
+
+Every play is a row on the device that played it: `plays(sha256, started_at,
+listened_ms, completed, source)` on the desktop, `play_events` on the phone. A
+play counts after 30 s or half the track, is *completed* past 90 %, and shows as a *skip* in the
+summary when it ended before half the track. Nothing
+is uploaded; the summary (`GET /api/ledger?period=month|last-month|7d|30d|year|all`)
+is computed on the box and the raw log is yours as a file
+(`GET /api/ledger/export`, format `cued-ledger/1`, the same shape the phone
+exports). `DELETE /api/ledger {"before":ms?}` forgets. The `ledger` setting
+(on) stops recording when off.

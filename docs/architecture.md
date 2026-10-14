@@ -55,3 +55,12 @@ The daemon spawns `python3 -m cued_companion.server` on a loopback port and prox
 companion API to it, so the phone's existing backend works unchanged apart from sending its pairing
 token (unpaired LAN devices are refused unless `companion_open_lan` is on). Finished jobs are hashed
 and moved into the library like any other file.
+
+## Party and ledger
+
+`party.rs` answers signed envelopes from friends on the LAN (search, queue, transport controls) and runs
+the UDP beacon on 8772 while a party is on; the handler is transport-agnostic so a phone host speaks the
+same protocol over Bluetooth LE. `ledger.rs` summarises the `plays` table; the player writes finished plays
+to an outbox that the 250 ms ticker drains into SQLite, so the audio path never touches the database.
+Karaoke is a `VocalCut` stage on the mixed output in the C++ engine (`karaoke.cpp`), toggled from the
+mini player and persisted in settings.

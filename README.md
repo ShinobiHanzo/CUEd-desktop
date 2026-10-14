@@ -109,9 +109,18 @@ track plus the next three; with *friend streaming* on, listeners pull temporary 
 host's desktop and stay within a few seconds, keeping thumbnails, lyrics and metadata for 48
 hours (§10). Theme colours live in the account chain too, so your phones match the desktop.
 
+## Ledger, party, karaoke (0.3.0)
+
+- **Ledger** tab: your listening, counted on the box: plays, hours, discoveries, streaks, the hour-of-day
+  shape, top artists / tracks / albums / genres; export the raw log as JSON you own.
+- **Party** (Friends tab): friends on the Wi-Fi find the desktop over a UDP beacon and queue songs from
+  its library with signed requests; only your friends list gets through. `python -m cued_companion.party`
+  is a command-line guest.
+- **Karaoke**: the K button on the mini player cuts the lead vocal and keeps the bass.
+
 ## Status
 
-Second cut (0.2.5). Everything above runs and is tested on Linux; the UI is a web page served by the daemon,
+Third cut (0.3.0). Everything above runs and is tested on Linux; the UI is a web page served by the daemon,
 which is what makes it work on an old laptop or a Pi next to the router. A native window (webview)
 and a tray icon are the obvious next step. The phone app still has to learn the `cued://pair` link
 and the sync calls (`docs/protocol.md` §2–3 is the spec; the phone repo's `docs/desktop.md` tracks

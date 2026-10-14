@@ -34,14 +34,33 @@ struct Inner {
     volume: f32,
     /// Bumped on every change the station host should publish.
     generation: u64,
+    /// Wall clock when `current` started, for the ledger.
+    started_at: i64,
+    /// Set once the current item has been written to the ledger outbox (end of track).
+    closed: bool,
+}
+
+/// A finished (or abandoned) play, waiting to be written to the ledger.
+#[derive(Debug, Clone)]
+pub struct PlayRecord {
+    pub sha256: String,
+    pub started_at: i64,
+    pub listened_ms: i64,
+    pub completed: bool,
 }
 
 pub struct Player {
     engine: Option<cued_audio::Engine>,
     inner: Mutex<Inner>,
     crossfade: Mutex<(f64, u8)>,
+    karaoke: Mutex<(bool, f32)>,
     headless: bool,
+    /// Plays to record; drained by the ticker so the player never touches the database itself.
+    outbox: Mutex<Vec<PlayRecord>>,
 }
+
+/// A play counts once it ran 30 s or half the track, whichever comes first; it is "completed" past 90 %.
+const MIN_LISTEN_SEC: f64 = 30.0;
 
 impl Player {
     pub fn new(enable_audio: bool, crossfade_secs: f64, curve: u8) -> Self {
@@ -61,7 +80,7 @@ impl Player {
         };
         // Null output (forced by CUED_AUDIO_NULL, or because no sound device opened): the daemon ticks the clock.
         let headless = engine.as_ref().map(|e| !e.has_device()).unwrap_or(true);
-        let p = Self { engine, inner: Mutex::new(Inner { current: None, queue: vec![], volume: 1.0, generation: 0 }), crossfade: Mutex::new((crossfade_secs, curve)), headless };
+        let p = Self { engine, inner: Mutex::new(Inner { current: None, queue: vec![], volume: 1.0, generation: 0, started_at: 0, closed: false }), crossfade: Mutex::new((crossfade_secs, curve)), karaoke: Mutex::new((false, 1.0)), headless, outbox: Mutex::new(Vec::new()) };
         p.set_crossfade(crossfade_secs, curve);
         p
     }
@@ -96,13 +115,62 @@ impl Player {
 
     /// Plays any file (a temporary station download, for instance).
     pub fn load_item(&self, item: QueueItem) -> anyhow::Result<()> {
+        let pos = self.position_sec();
         if let Some(e) = &self.engine {
             e.load(Path::new(&item.path), true)?;
         }
         let mut i = self.lock();
+        self.close_current(&mut i, pos);
         i.current = Some(item);
+        i.started_at = crate::db::now_ms();
+        i.closed = false;
         i.generation += 1;
         Ok(())
+    }
+
+    fn position_sec(&self) -> f64 {
+        self.engine.as_ref().map(|e| e.status().position_sec).unwrap_or(0.0)
+    }
+
+    /// Writes the current item to the ledger outbox (once) if it played long enough. Caller holds `inner`.
+    fn close_current(&self, i: &mut Inner, position_sec: f64) {
+        if i.closed {
+            return;
+        }
+        let Some(cur) = &i.current else { return };
+        i.closed = true;
+        let dur = cur.duration_ms as f64 / 1000.0;
+        let listened = if position_sec > 0.0 { position_sec } else { (crate::db::now_ms() - i.started_at) as f64 / 1000.0 };
+        let counts = listened >= MIN_LISTEN_SEC || (dur > 0.0 && listened >= dur * 0.5);
+        if !counts || cur.sha256.is_empty() {
+            return;
+        }
+        let completed = dur > 0.0 && listened >= dur * 0.9;
+        self.outbox.lock().unwrap_or_else(|p| p.into_inner()).push(PlayRecord { sha256: cur.sha256.clone(), started_at: i.started_at, listened_ms: (listened * 1000.0) as i64, completed });
+    }
+
+    /// The current item reached its end on its own (nothing queued): count it as completed.
+    pub fn mark_ended(&self) {
+        let pos = self.position_sec();
+        let mut i = self.lock();
+        self.close_current(&mut i, pos);
+    }
+
+    /// Plays recorded since the last call.
+    pub fn take_plays(&self) -> Vec<PlayRecord> {
+        std::mem::take(&mut *self.outbox.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    pub fn set_karaoke(&self, on: bool, strength: f32) {
+        let strength = if strength.is_nan() { 1.0 } else { strength.clamp(0.0, 1.0) };
+        if let Some(e) = &self.engine {
+            e.set_karaoke(on, strength);
+        }
+        *self.karaoke.lock().unwrap_or_else(|p| p.into_inner()) = (on, strength);
+    }
+
+    pub fn karaoke(&self) -> (bool, f32) {
+        *self.karaoke.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     pub fn play(&self) {
@@ -118,10 +186,12 @@ impl Player {
         self.lock().generation += 1;
     }
     pub fn stop(&self) {
+        let pos = self.position_sec();
         if let Some(e) = &self.engine {
             let _ = e.stop();
         }
         let mut i = self.lock();
+        self.close_current(&mut i, pos);
         i.current = None;
         i.generation += 1;
     }
@@ -164,13 +234,17 @@ impl Player {
             }
             i.queue.remove(0)
         };
+        let pos = self.position_sec();
         if let Some(e) = &self.engine {
             if let Err(err) = e.load(Path::new(&next.path), true) {
                 warn!("could not load {}: {err}", next.path);
             }
         }
         let mut i = self.lock();
+        self.close_current(&mut i, pos);
         i.current = Some(next);
+        i.started_at = crate::db::now_ms();
+        i.closed = false;
         i.generation += 1;
         true
     }
@@ -189,6 +263,8 @@ impl Player {
             "crossfadeSeconds": secs,
             "crossfadeCurve": curve,
             "volume": i.volume,
+            "karaoke": self.karaoke().0,
+            "karaokeStrength": self.karaoke().1,
             "current": i.current,
             "queue": i.queue.len(),
         })
@@ -231,6 +307,19 @@ pub fn spawn_ticker(state: Arc<AppState>, shutdown: tokio_util::sync::Cancellati
             let dur = st["durationSec"].as_f64().unwrap_or(0.0);
             let fade = st["crossfadeSeconds"].as_f64().unwrap_or(0.0);
             let fading = st["crossfading"].as_bool().unwrap_or(false);
+            // Ledger: a track that ran out with nothing queued, and anything the player closed since the last tick.
+            if !playing && dur > 0.0 && pos >= dur - 0.75 && st["current"].is_object() {
+                state.player.mark_ended();
+            }
+            if state.settings().ledger {
+                for p in state.player.take_plays() {
+                    if let Err(e) = state.db.record_play(&p.sha256, p.started_at, p.listened_ms, p.completed) {
+                        warn!("ledger: {e}");
+                    }
+                }
+            } else {
+                state.player.take_plays();
+            }
             if playing && !fading && dur > 0.0 && pos >= (dur - fade.max(0.5)) && st["queue"].as_u64().unwrap_or(0) > 0 {
                 state.player.next();
             }

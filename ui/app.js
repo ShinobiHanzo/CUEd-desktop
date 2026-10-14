@@ -24,7 +24,7 @@ function kv(obj) { return `<dl class="kv">${Object.entries(obj).map(([k, v]) => 
 async function copyText(t) { try { await navigator.clipboard.writeText(t); toast('Copied'); } catch { prompt('Copy:', t); } }
 
 /* ---------- routing: #tab or #settings/<sub> ---------- */
-const TABS = ['link', 'library', 'backup', 'stations', 'friends', 'relay', 'downloads', 'settings'];
+const TABS = ['link', 'library', 'backup', 'stations', 'friends', 'ledger', 'relay', 'downloads', 'settings'];
 const SUBS = ['general', 'theme', 'account', 'relay'];
 const loaders = {}, subLoaders = {};
 let currentTab = 'link', currentSub = 'general';
@@ -313,7 +313,23 @@ $('#reveal-nsec').addEventListener('click', guard(async () => { const r = await 
 
 /* ---------- friends ---------- */
 const FRIEND_STATUS = { friends: ['friends', 'on'], pending_out: ['request sent', ''], pending_in: ['wants to be friends', 'alt'] };
+const partyLog = [];
+function renderPartyLog() {
+  const el = $('#party-log'); if (!el) return;
+  el.innerHTML = partyLog.length ? '' : '<div class="empty muted small">No guest activity yet.</div>';
+  for (const e of partyLog.slice(0, 12)) { const row = document.createElement('div'); row.className = 'item'; row.innerHTML = `<div class="grow"><div class="title">${esc(e.who)}</div><div class="sub">${esc(e.what)} · ${ago(e.at)}</div></div>`; el.appendChild(row); }
+}
+async function loadParty() {
+  const s = await api('/api/settings');
+  $('#party-enabled').checked = !!s.party_enabled; $('#party-controls').checked = !!s.party_controls;
+  $('#party-badge').textContent = s.party_enabled ? 'on' : 'off'; $('#party-badge').classList.toggle('on', !!s.party_enabled);
+  renderPartyLog();
+}
+$('#party-enabled').addEventListener('change', guard(async e => { await api('/api/settings', { method: 'PUT', body: { party_enabled: e.target.checked } }); loadParty(); }));
+$('#party-controls').addEventListener('change', guard(async e => { await api('/api/settings', { method: 'PUT', body: { party_controls: e.target.checked } }); }));
+
 loaders.friends = guard(async () => {
+  loadParty().catch(() => {});
   const [friends, requests, link, feed] = await Promise.all([api('/api/friends'), api('/api/friends/requests'), api('/api/friends/link'), api('/api/stations/feed').catch(() => ({ stations: [] })), loadListening()]);
   renderListen($('#listen-now-friends'));
   $('#friend-qr').innerHTML = link.svg || ''; $('#friend-link').textContent = `${link.npub}\n${link.link}`;
@@ -366,6 +382,36 @@ $('#upstream-form').addEventListener('submit', guard(async e => { e.preventDefau
 $('#mirror-out').addEventListener('change', guard(async e => { await api('/api/settings', { method: 'PUT', body: { mirror_out: e.target.checked } }); }));
 $('#mirror-in').addEventListener('change', guard(async e => { await api('/api/settings', { method: 'PUT', body: { mirror_in: e.target.checked } }); }));
 $('#companion-open').addEventListener('change', guard(async e => { await api('/api/settings', { method: 'PUT', body: { companion_open_lan: e.target.checked } }); }));
+
+/* ---------- ledger ---------- */
+function bars(el, values, labels) {
+  const max = Math.max(1, ...values);
+  el.innerHTML = values.map((v, i) => `<div class="bar" title="${esc(labels[i])}: ${v}"><i style="height:${Math.round(100 * v / max)}%"></i><span>${esc(labels[i])}</span></div>`).join('');
+}
+function topList(el, entries, unit) {
+  el.innerHTML = entries.length ? '' : '<div class="empty muted small">Nothing yet.</div>';
+  for (const e of entries) { const row = document.createElement('div'); row.className = 'item'; row.innerHTML = `<div class="grow"><div class="title">${esc(e.name)}</div><div class="sub">${esc(e.sub || '')}</div></div><span class="badge">${e.plays} ${unit}</span><span class="badge alt">${fmtHours(e.listenedMs)}</span>`; el.appendChild(row); }
+}
+function fmtHours(ms) { const m = Math.round((ms || 0) / 60000); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; }
+loaders.ledger = guard(async () => {
+  const period = $('#ledger-period').value;
+  $('#ledger-export').href = `/api/ledger/export?period=${period}`;
+  const r = await api(`/api/ledger?period=${period}`);
+  const s = r.summary;
+  $('#ledger-enabled').checked = !!r.enabled;
+  const tiles = [
+    ['Plays', s.plays], ['Listening time', fmtHours(s.listenedMs)], ['Tracks', s.uniqueTracks], ['Artists', s.uniqueArtists],
+    ['New to you', s.discoveries], ['Active days', s.activeDays], ['Longest streak', `${s.longestStreakDays} d`], ['Current streak', `${s.currentStreakDays} d`],
+    ['Skip rate', `${Math.round(100 * s.skipRate)}%`], ['Busiest day', s.peakDay ? `${new Date(s.peakDay * 86400000).toLocaleDateString()} · ${s.peakDayPlays}` : '–'],
+  ];
+  $('#ledger-tiles').innerHTML = tiles.map(([k, v]) => `<div class="tile"><b>${esc(String(v))}</b><span>${esc(k)}</span></div>`).join('');
+  bars($('#ledger-hours'), s.byHour, s.byHour.map((_, i) => i % 3 === 0 ? String(i) : ''));
+  bars($('#ledger-weekdays'), s.byWeekday, ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']);
+  topList($('#ledger-artists'), s.topArtists, 'plays'); topList($('#ledger-tracks'), s.topTracks, 'plays'); topList($('#ledger-albums'), s.topAlbums, 'plays'); topList($('#ledger-genres'), s.topGenres, 'plays');
+});
+$('#ledger-period').addEventListener('change', () => loaders.ledger());
+$('#ledger-enabled').addEventListener('change', guard(async e => { await api('/api/settings', { method: 'PUT', body: { ledger: e.target.checked } }); }));
+$('#ledger-clear').addEventListener('click', guard(async () => { if (confirm('Forget every recorded play on this desktop?')) { await api('/api/ledger', { method: 'DELETE' }); toast('Ledger cleared'); loaders.ledger(); } }));
 
 /* ---------- downloads ---------- */
 loaders.downloads = guard(async () => {
@@ -452,6 +498,7 @@ function renderPlayer(st) {
   if (!volDragging && typeof st.volume === 'number') $('#p-vol').value = Math.round(st.volume * 100);
   $('#p-time').textContent = `${fmtTime(st.positionSec)} / ${fmtTime(st.durationSec)}`;
   $('#p-queue').textContent = st.queue ? `+${st.queue}` : '';
+  $('#mini-karaoke').classList.toggle('on', !!st.karaoke);
   if (expanded && lyrics?.synced) syncLyrics(lastPos);
 }
 $('#p-play').addEventListener('click', guard(async () => { const st = await api('/api/player'); renderPlayer(await api(st.playing ? '/api/player/pause' : '/api/player/play', { body: {} })); }));
@@ -460,6 +507,7 @@ $('#p-seek').addEventListener('input', e => { seeking = true; e.target.style.set
 $('#p-seek').addEventListener('change', guard(async e => { seeking = false; const st = await api('/api/player'); renderPlayer(await api('/api/player/seek', { body: { positionSec: st.durationSec * e.target.value / 1000 } })); }));
 $('#p-vol').addEventListener('input', () => { volDragging = true; });
 $('#p-vol').addEventListener('change', guard(async e => { volDragging = false; await api('/api/player/volume', { body: { volume: e.target.value / 100 } }); }));
+$('#mini-karaoke').addEventListener('click', guard(async () => { const st = await api('/api/player'); renderPlayer(await api('/api/player/karaoke', { body: { on: !st.karaoke } })); toast(st.karaoke ? 'Karaoke off' : 'Karaoke on: lead vocal cut, bass kept'); }));
 $('#mini-lyrics').addEventListener('click', () => { expanded = !expanded; mini.classList.toggle('expanded', expanded); if (expanded) { if (!lyrics) loadLyrics(); else setTimeout(() => syncLyrics(lastPos), 260); } });
 $('#mini-close').addEventListener('click', () => { mini.hidden = true; $('#mini-open').hidden = false; });
 $('#mini-open').addEventListener('click', () => { mini.hidden = false; $('#mini-open').hidden = true; pollPlayer(); });
@@ -486,6 +534,7 @@ function connectEvents() {
       case 'shared': if (m.shared) setShared(m.shared); else loadShared(); if (subActive('relay')) subLoaders.relay(); break;
       case 'account': if (subActive('account')) subLoaders.account(); loadStatus().catch(() => {}); break;
       case 'listen': loadListening().then(() => { renderListen($('#listen-now-stations')); renderListen($('#listen-now-friends')); refreshSocial(); }); break;
+      case 'party': partyLog.unshift({ who: m.who, what: m.what, at: Date.now() }); toast(`${m.who} ${m.what}`); if (tabActive('friends')) renderPartyLog(); break;
       case 'notice': toast(m.text); break;
     }
   };

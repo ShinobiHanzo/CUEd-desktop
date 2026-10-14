@@ -21,6 +21,7 @@ add_library(cued_audio STATIC
   src/spectrogram.cpp
   src/bpm.cpp
   src/crossfade.cpp
+  src/karaoke.cpp
   src/decoder.cpp
   src/analysis.cpp
   src/engine.cpp
@@ -47,7 +48,7 @@ endif()
 # ---- tests -----------------------------------------------------------------
 if(CUED_AUDIO_BUILD_TESTS)
   enable_testing()
-  foreach(t fft spectrogram bpm crossfade decoder engine)
+  foreach(t fft spectrogram bpm crossfade decoder engine karaoke)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE cued_audio)
     target_include_directories(test_${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

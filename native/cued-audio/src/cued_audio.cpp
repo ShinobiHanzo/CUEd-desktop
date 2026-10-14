@@ -69,6 +69,10 @@ void cued_engine_set_volume(cued_engine* e, float v01) {
     if (e) e->impl.setVolume(v01);
 }
 
+void cued_engine_set_karaoke(cued_engine* e, int on, float strength) {
+    if (e) e->impl.setKaraoke(on != 0, strength);
+}
+
 void cued_engine_status(cued_engine* e, cued_status* out) {
     if (!out) return;
     std::memset(out, 0, sizeof *out);

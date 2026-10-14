@@ -10,6 +10,7 @@
 
 #include "crossfade.h"
 #include "decoder.h"
+#include "karaoke.h"
 #include "spectrogram.h"
 
 struct ma_device; // from miniaudio.h, kept out of this header
@@ -50,6 +51,8 @@ public:
     int seek(double seconds);
     void setCrossfade(double seconds, CrossfadeCurve curve);
     void setVolume(float v);
+    // Vocal cut on the mixed output (karaoke). strength 0..1.
+    void setKaraoke(bool on, float strength);
     EngineStatus status();
     // Copies up to maxBands of the latest spectrum; returns the count.
     int spectrum(float* out, int maxBands);
@@ -86,6 +89,8 @@ private:
     double crossfadeSec_ = 6.0;
     CrossfadeCurve curve_ = CrossfadeCurve::EqualPower;
     float volume_ = 1.0f;
+    bool karaokeOn_ = false;
+    VocalCut karaoke_;
 
     Spectrogram spectrogram_;
     StreamingSpectrogram streaming_;
