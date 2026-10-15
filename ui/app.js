@@ -413,6 +413,78 @@ $('#ledger-period').addEventListener('change', () => loaders.ledger());
 $('#ledger-enabled').addEventListener('change', guard(async e => { await api('/api/settings', { method: 'PUT', body: { ledger: e.target.checked } }); }));
 $('#ledger-clear').addEventListener('click', guard(async () => { if (confirm('Forget every recorded play on this desktop?')) { await api('/api/ledger', { method: 'DELETE' }); toast('Ledger cleared'); loaders.ledger(); } }));
 
+/* ---------- updates & patch notes ---------- */
+function renderNotes(md) {
+  // Markdown-lite: ## / ### headings, - bullets, paragraphs; **bold** and `code` inline.
+  const inline = t => esc(t).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>');
+  const out = []; let list = []; let para = [];
+  const flushList = () => { if (list.length) { out.push(`<ul>${list.map(i => `<li>${inline(i)}</li>`).join('')}</ul>`); list = []; } };
+  const flushPara = () => { if (para.length) { out.push(`<p>${inline(para.join(' '))}</p>`); para = []; } };
+  for (const raw of (md || '').split('\n')) {
+    const line = raw.trimEnd();
+    if (/^##+ /.test(line)) { flushList(); flushPara(); const t = line.replace(/^##+ /, ''); out.push(`<h3>${/^\d/.test(t) ? 'Version ' + esc(t) : esc(t)}</h3>`); }
+    else if (/^[-*] /.test(line)) { flushPara(); list.push(line.slice(2).trim()); }
+    else if (/^\s{2,}\S/.test(line) && list.length && !para.length) { list[list.length - 1] += ' ' + line.trim(); }
+    else if (!line.trim()) { flushList(); flushPara(); }
+    else { flushList(); para.push(line.trim()); }
+  }
+  flushList(); flushPara();
+  return out.join('') || '<p class="muted">No notes for this version.</p>';
+}
+function showNotes(title, md, onClose) {
+  const node = $('#notes-dialog').content.cloneNode(true);
+  node.querySelector('.notes-title').textContent = title;
+  node.querySelector('.notes-body').innerHTML = renderNotes(md);
+  const root = node.querySelector('.modal');
+  node.querySelector('.close').addEventListener('click', () => { root.remove(); onClose?.(); });
+  document.body.appendChild(node);
+}
+let updateInfo = null;
+async function loadUpdate() {
+  updateInfo = await api('/api/update');
+  const u = updateInfo, i = u.info || {};
+  $('#upd-auto').checked = !!u.autoUpdate;
+  const staged = u.staged;
+  const badge = $('#upd-badge');
+  const state = staged ? 'staged' : i.state || 'idle';
+  badge.textContent = { idle: 'idle', checking: 'checking…', downloading: `downloading ${Math.round((i.progress || 0) * 100)}%`, staged: `v${staged?.version || i.latest?.version} ready`, 'up-to-date': 'up to date', available: `v${i.latest?.version} available`, error: 'error' }[state] || state;
+  badge.classList.toggle('on', state === 'staged' || state === 'up-to-date'); badge.classList.toggle('warn', state === 'error');
+  const rows = { 'Running': `v${u.current} (${u.target})`, 'Latest on GitHub': i.latest ? `v${i.latest.version}${i.latest.publishedAt ? ' · ' + new Date(i.latest.publishedAt).toLocaleDateString() : ''}` : (i.checkedAt ? 'none for this platform' : 'not checked yet'), 'Last check': i.checkedAt ? ago(i.checkedAt) : 'never' };
+  if (staged) rows['Staged'] = `v${staged.version}, verified · installs on the next launch`;
+  if (i.error) rows['Problem'] = esc(i.error);
+  if (u.applyError) rows['Last install'] = `failed: ${esc(u.applyError)}`;
+  if (!u.canInstall) rows['Note'] = 'the folder holding cuedd is not writable by this user, so staged versions cannot be swapped in; unpack the archive by hand';
+  $('#upd-info').innerHTML = kv(rows);
+  $('#upd-stage').hidden = !(i.latest && !staged && state === 'available');
+  $('#upd-install').hidden = !(staged && u.canInstall);
+  $('#upd-discard').hidden = !staged;
+  if (state === 'downloading' || state === 'checking') setTimeout(() => { if (subActive('general')) loadUpdate().catch(() => {}); }, 1500);
+}
+subLoaders.general = (orig => async () => { await orig(); await loadUpdate().catch(() => {}); })(subLoaders.general);
+$('#upd-auto').addEventListener('change', guard(async e => { await api('/api/settings', { method: 'PUT', body: { auto_update: e.target.checked } }); loadUpdate(); }));
+$('#upd-check').addEventListener('click', guard(async () => { $('#upd-badge').textContent = 'checking…'; await api('/api/update/check', { body: {} }); await loadUpdate(); }));
+$('#upd-stage').addEventListener('click', guard(async () => { await api('/api/update/stage', { body: {} }); await loadUpdate(); }));
+$('#upd-discard').addEventListener('click', guard(async () => { await api('/api/update/discard', { body: {} }); await loadUpdate(); }));
+$('#upd-notes').addEventListener('click', guard(async () => { const n = await api(`/api/update/notes?to=${encodeURIComponent(updateInfo?.current || '')}`); showNotes(`What's new in ${n.to}`, n.markdown); }));
+$('#upd-install').addEventListener('click', guard(async () => {
+  if (!confirm(`Install v${updateInfo?.staged?.version} now? The daemon restarts; playback stops for a moment.`)) return;
+  await api('/api/update/install', { body: {} }).catch(() => {});
+  toast('Restarting into the new version…');
+  const started = Date.now();
+  const poll = setInterval(async () => {
+    try { const st = await api('/api/status'); if (st.version !== updateInfo?.current || Date.now() - started > 60000) { clearInterval(poll); location.reload(); } }
+    catch { /* down while swapping */ }
+  }, 1500);
+}));
+/* after an update: the new version shows its notes once */
+async function maybeShowWhatsNew() {
+  try {
+    const u = await api('/api/update');
+    if (u.applied && !u.notesSeen && u.notes) showNotes(`What's new in ${u.applied.to}`, u.notes, () => api('/api/update/seen', { body: {} }).catch(() => {}));
+  } catch { /* not admin, or daemon away */ }
+}
+maybeShowWhatsNew();
+
 /* ---------- downloads ---------- */
 loaders.downloads = guard(async () => {
   await loadStatus();

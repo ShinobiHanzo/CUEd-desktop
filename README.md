@@ -118,9 +118,19 @@ hours (§10). Theme colours live in the account chain too, so your phones match 
   is a command-line guest.
 - **Karaoke**: the K button on the mini player cuts the lead vocal and keeps the bass.
 
+## Updates
+
+`cuedd` updates itself the way a self-hosted thing should: it looks at this repository's Releases for its
+own platform, downloads the next archive in the background, checks it against the published SHA-256
+and keeps it staged under `<data>/updates/`. It never swaps binaries while running on its own: the
+staged version installs on the next launch (or on *Install now and restart* in Settings → General →
+Updates), the previous binary stays as `cuedd.old`, and the first page load afterwards shows the patch
+notes from `CHANGELOG.md`. Turn the automatic download off in the same card; unpacking an archive by
+hand keeps working as before.
+
 ## Status
 
-Third cut (0.3.0). Everything above runs and is tested on Linux; the UI is a web page served by the daemon,
+Third cut (0.3.1). Everything above runs and is tested on Linux; the UI is a web page served by the daemon,
 which is what makes it work on an old laptop or a Pi next to the router. A native window (webview)
 and a tray icon are the obvious next step. The phone app still has to learn the `cued://pair` link
 and the sync calls (`docs/protocol.md` §2–3 is the spec; the phone repo's `docs/desktop.md` tracks

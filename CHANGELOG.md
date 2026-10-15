@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1
+
+- **Updates install themselves, on your terms.** The daemon checks GitHub Releases for its own
+  platform (first a minute after start, then every six hours), downloads the next archive in the
+  background, verifies it against the published SHA-256 and stages it under `<data>/updates/`.
+  Nothing changes while you are using it: the staged version is swapped in on the next launch (or
+  with *Install now and restart* in Settings → General → Updates) and the previous binary is kept
+  as `cuedd.old`. The switch *Download updates automatically* turns the download off; `canInstall`
+  tells you when the folder is not writable.
+- **Patch notes after an update.** The first UI load on a new version shows what changed since the
+  one you ran before, from this changelog compiled into the binary; *What's new* brings it back.
+- `GET /api/update`, `POST /api/update/{check,stage,install,discard,seen}`, `GET /api/update/notes`.
+
 ## 0.3.0
 
 Three things Spotify does not do, all local:

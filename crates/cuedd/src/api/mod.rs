@@ -10,6 +10,7 @@ pub mod party;
 pub mod player;
 pub mod stations;
 pub mod sync;
+pub mod update;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -306,6 +307,14 @@ pub fn router(state: App, origin: Origin) -> Router {
         .route("/party", post(party::party))
         .route("/ledger", get(party::ledger).delete(party::clear))
         .route("/ledger/export", get(party::export))
+        // self-update and patch notes
+        .route("/update", get(update::get))
+        .route("/update/check", post(update::check))
+        .route("/update/stage", post(update::stage))
+        .route("/update/install", post(update::install))
+        .route("/update/discard", post(update::discard))
+        .route("/update/seen", post(update::seen))
+        .route("/update/notes", get(update::notes))
         // stations
         .route("/identity", get(stations::identity))
         .route("/stations/follows", get(stations::follows).post(stations::follow))
@@ -360,6 +369,7 @@ async fn status(_u: AnyUser, State(s): State<App>) -> ApiResult<Json<serde_json:
         "companion": companion,
         "audio": s.player.describe(),
         "pendingPairs": s.pending_pair_count(),
+        "update": { "applied": crate::update::read_applied(&s.data_dir).is_some(), "staged": crate::update::read_staged(&s.data_dir).map(|st| st.version), "notesSeen": s.settings().notes_seen_version == crate::update::CURRENT },
     })))
 }
 

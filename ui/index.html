@@ -191,6 +191,20 @@
             </form>
             <div id="about" class="kv"></div>
           </div>
+          <div class="card">
+            <h2>Updates <span id="upd-badge" class="badge">checking…</span></h2>
+            <p class="muted">The daemon looks at GitHub Releases for its own platform, downloads the next version in the background and checks it against the published SHA-256. Nothing is swapped while you are using it: the staged version installs on the next launch, and the patch notes show once it is running. The previous binary is kept as <code>cuedd.old</code> until the next start.</p>
+            <div id="upd-info" class="kv"></div>
+            <label class="check"><input type="checkbox" id="upd-auto"> Download updates automatically and install on the next launch</label>
+            <div class="row tight">
+              <button id="upd-check">Check now</button>
+              <button id="upd-stage" hidden>Download now</button>
+              <button id="upd-install" class="primary" hidden>Install now and restart</button>
+              <button id="upd-discard" class="danger" hidden>Discard staged</button>
+              <span class="grow"></span>
+              <button id="upd-notes">What's new</button>
+            </div>
+          </div>
         </div>
 
         <div id="settings-theme" class="sub">
@@ -264,6 +278,7 @@
 </aside>
 
 <div id="toast"></div>
+<template id="notes-dialog"><div class="modal"><div class="card notes"><h2 class="notes-title">What's new</h2><div class="notes-body"></div><button class="primary close">Got it</button></div></div></template>
 <template id="share-dialog"><div class="modal"><div class="card"><h2>Send to a phone</h2><p class="muted small">On the phone: Receive → Scan a QR code. The link works for 30 minutes; the phone pulls the file straight from this desktop.</p><div class="qr"></div><code class="wrap"></code><label class="check"><input type="checkbox" class="share-friend"> Send a friend request with it</label><p class="muted small">With the request, the link also carries your public key and name; the receiver can accept it with one tap.</p><button class="primary close">Done</button></div></div></template>
 <script src="/app.js"></script>
 </body>

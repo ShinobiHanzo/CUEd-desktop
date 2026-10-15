@@ -20,6 +20,7 @@ mod state;
 mod stations;
 mod store;
 mod ui;
+mod update;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -81,6 +82,9 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_dir).with_context(|| format!("creating {}", data_dir.display()))?;
     info!("data directory {}", data_dir.display());
 
+    // A release staged on the last run installs now: swap the binaries and re-execute (returns only when there is nothing to do or it failed).
+    update::at_startup(&data_dir);
+
     let shutdown = CancellationToken::new();
     let state = AppState::open(state::Options {
         data_dir: data_dir.clone(),
@@ -111,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
     // Background services.
     stations::spawn(state.clone(), shutdown.clone());
     party::spawn_beacon(state.clone(), shutdown.clone());
+    update::spawn(state.clone(), shutdown.clone());
     if !args.no_companion {
         companion::spawn(state.clone(), shutdown.clone());
     }

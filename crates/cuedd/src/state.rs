@@ -99,6 +99,8 @@ pub struct AppState {
     pub challenges: Mutex<HashMap<String, Challenge>>,
     /// Party request nonces seen lately (replay protection).
     pub party_nonces: Mutex<crate::party::NonceCache>,
+    /// What the self-updater knows (latest release, staged archive, progress).
+    pub update: Mutex<crate::update::UpdateInfo>,
     /// Verified assertions: `<challenge>.<sig>` → (device, verified at).
     pub assertions: Mutex<HashMap<String, (String, Instant)>>,
     pub listen: crate::listen::ListenShared,
@@ -142,6 +144,7 @@ impl AppState {
             (None, None)
         };
 
+        let data_dir_for_update = o.data_dir.clone();
         Ok(Arc::new(Self {
             data_dir: o.data_dir,
             port: o.port,
@@ -156,6 +159,7 @@ impl AppState {
             share_caps: Mutex::new(HashMap::new()),
             challenges: Mutex::new(HashMap::new()),
             party_nonces: Mutex::new(Default::default()),
+            update: Mutex::new(crate::update::UpdateInfo { staged: crate::update::read_staged(&data_dir_for_update), apply_error: crate::update::read_apply_error(&data_dir_for_update), state: "idle".into(), ..Default::default() }),
             assertions: Mutex::new(HashMap::new()),
             listen: Default::default(),
             events,

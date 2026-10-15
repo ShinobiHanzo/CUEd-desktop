@@ -34,6 +34,10 @@ pub struct Settings {
     pub party_controls: bool,
     /// Keep the listening ledger (plays table). Off stops recording; existing rows stay until cleared.
     pub ledger: bool,
+    /// Download the next release in the background and install it on the next launch.
+    pub auto_update: bool,
+    /// The version whose patch notes have been read, so the "what's new" card shows once.
+    pub notes_seen_version: String,
 }
 
 impl Default for Settings {
@@ -53,6 +57,8 @@ impl Default for Settings {
             party_enabled: false,
             party_controls: true,
             ledger: true,
+            auto_update: true,
+            notes_seen_version: String::new(),
         }
     }
 }

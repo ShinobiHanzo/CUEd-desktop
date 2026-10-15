@@ -64,3 +64,14 @@ same protocol over Bluetooth LE. `ledger.rs` summarises the `plays` table; the p
 to an outbox that the 250 ms ticker drains into SQLite, so the audio path never touches the database.
 Karaoke is a `VocalCut` stage on the mixed output in the C++ engine (`karaoke.cpp`), toggled from the
 mini player and persisted in settings.
+
+## Self-update
+
+`update.rs`: a background task asks GitHub Releases for the archive matching the compile-time target
+(`CUED_TARGET` from `build.rs`), downloads it with the SHA-256 check and writes `updates/pending/meta.json`.
+At startup `at_startup` extracts a staged archive with the system `tar` (bsdtar on Windows opens the zip),
+copies `cuedd` (and `cued-funnel` when installed) next to the running binary, renames the old ones to
+`.old`, writes `updates/applied.json` and re-executes itself with the same arguments (`exec` on Unix,
+spawn-and-exit on Windows). The new version serves `applied.json` through `/api/update` until the notes
+are marked seen. Failures are written to `updates/apply-error.txt` and shown in the Updates card; the
+old binary keeps running.
