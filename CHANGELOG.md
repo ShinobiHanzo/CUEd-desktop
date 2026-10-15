@@ -11,6 +11,8 @@
   tells you when the folder is not writable.
 - **Patch notes after an update.** The first UI load on a new version shows what changed since the
   one you ran before, from this changelog compiled into the binary; *What's new* brings it back.
+- **✨ in the top-left corner** opens the notes of the version you run, or, with a red dot, of the
+  update waiting for you, with its *Download now* or *Install now and restart* button inside.
 - `GET /api/update`, `POST /api/update/{check,stage,install,discard,seen}`, `GET /api/update/notes`.
 
 ## 0.3.0

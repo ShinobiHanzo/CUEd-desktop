@@ -431,18 +431,47 @@ function renderNotes(md) {
   flushList(); flushPara();
   return out.join('') || '<p class="muted">No notes for this version.</p>';
 }
-function showNotes(title, md, onClose) {
+function showNotes(title, md, onClose, opts = {}) {
   const node = $('#notes-dialog').content.cloneNode(true);
   node.querySelector('.notes-title').textContent = title;
+  node.querySelector('.notes-sub').textContent = opts.sub || '';
   node.querySelector('.notes-body').innerHTML = renderNotes(md);
   const root = node.querySelector('.modal');
+  const act = node.querySelector('.act');
+  if (opts.action) { act.hidden = false; act.textContent = opts.action; act.addEventListener('click', async () => { act.disabled = true; try { await opts.onAction?.(); } finally { root.remove(); } }); }
   node.querySelector('.close').addEventListener('click', () => { root.remove(); onClose?.(); });
   document.body.appendChild(node);
 }
+/* the ✨ button: notes of the running version, or of the update waiting for you, with its download / install button inside */
+function updatePending(u) { const i = u?.info || {}; return !!(u?.staged || (i.latest && i.state === 'available') || i.state === 'downloading'); }
+function setSparkle(u) { $('#whats-new .dot').hidden = !updatePending(u); }
+async function openWhatsNew() {
+  const u = await api('/api/update').catch(() => null);
+  updateInfo = u || updateInfo;
+  const i = u?.info || {};
+  if (u?.staged) {
+    showNotes(`v${u.staged.version} is ready to install`, i.latest?.notes || `## ${u.staged.version}\n\nDownloaded and verified; it installs on the next launch.`, null, {
+      sub: `Running v${u.current}. The archive was checked against the published SHA-256 and installs on the next launch of cuedd.`,
+      action: u.canInstall ? 'Install now and restart' : null, onAction: () => $('#upd-install').click(),
+    });
+  } else if (i.latest && (i.state === 'available' || i.state === 'downloading')) {
+    showNotes(`v${i.latest.version} is available`, i.latest.notes || `## ${i.latest.version}`, null, {
+      sub: i.state === 'downloading' ? `Downloading… ${Math.round((i.progress || 0) * 100)}%` : `Running v${u.current}. Download now, or let the daemon fetch it in the background; either way it installs on the next launch.`,
+      action: i.state === 'downloading' ? null : 'Download now', onAction: async () => { await api('/api/update/stage', { body: {} }); toast(`Downloading v${i.latest.version}…`); if (subActive('general')) loadUpdate(); },
+    });
+  } else {
+    const n = await api(`/api/update/notes?to=${encodeURIComponent(u?.current || '')}`);
+    showNotes(`What's new in ${n.to}`, n.markdown, null, { sub: `Running v${n.to}. These notes are compiled into the daemon.` });
+  }
+}
+$('#whats-new').addEventListener('click', guard(openWhatsNew));
+async function pollSparkle() { try { const u = await api('/api/update'); updateInfo = u; setSparkle(u); } catch { /* not admin or daemon away */ } }
+pollSparkle(); setInterval(pollSparkle, 10 * 60 * 1000);
 let updateInfo = null;
 async function loadUpdate() {
   updateInfo = await api('/api/update');
   const u = updateInfo, i = u.info || {};
+  setSparkle(u);
   $('#upd-auto').checked = !!u.autoUpdate;
   const staged = u.staged;
   const badge = $('#upd-badge');
@@ -465,7 +494,7 @@ $('#upd-auto').addEventListener('change', guard(async e => { await api('/api/set
 $('#upd-check').addEventListener('click', guard(async () => { $('#upd-badge').textContent = 'checking…'; await api('/api/update/check', { body: {} }); await loadUpdate(); }));
 $('#upd-stage').addEventListener('click', guard(async () => { await api('/api/update/stage', { body: {} }); await loadUpdate(); }));
 $('#upd-discard').addEventListener('click', guard(async () => { await api('/api/update/discard', { body: {} }); await loadUpdate(); }));
-$('#upd-notes').addEventListener('click', guard(async () => { const n = await api(`/api/update/notes?to=${encodeURIComponent(updateInfo?.current || '')}`); showNotes(`What's new in ${n.to}`, n.markdown); }));
+$('#upd-notes').addEventListener('click', guard(openWhatsNew));
 $('#upd-install').addEventListener('click', guard(async () => {
   if (!confirm(`Install v${updateInfo?.staged?.version} now? The daemon restarts; playback stops for a moment.`)) return;
   await api('/api/update/install', { body: {} }).catch(() => {});

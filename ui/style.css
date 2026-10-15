@@ -114,3 +114,7 @@ td.num,th.num{text-align:right}tr:hover td{background:var(--panel)}td .icon{back
 .notes-body{overflow:auto;flex:1;margin:8px 0 14px;padding-right:6px}
 .notes-body h3{margin:14px 0 6px;color:var(--accent);font-size:15px}
 .notes-body ul{margin:4px 0 8px 18px;padding:0}.notes-body li{margin:4px 0}.notes-body p{margin:6px 0}
+
+.sparkle{position:relative;font-size:15px}
+.sparkle .dot{position:absolute;top:-2px;right:-2px;width:10px;height:10px;border-radius:50%;background:var(--danger);border:2px solid var(--bg)}
+.notes-actions{margin-top:4px}

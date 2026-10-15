@@ -10,6 +10,7 @@
 <body>
 <header>
   <div class="brand"><img src="/icon.svg" alt=""><span>CUEd</span><small id="desktop-name"></small></div>
+  <button id="whats-new" class="icon-btn sparkle" title="What's new"><span>✨</span><i class="dot" hidden></i></button>
   <nav id="main-nav">
     <button data-tab="link" class="active">Link a phone</button>
     <button data-tab="library">Library</button>
@@ -278,7 +279,7 @@
 </aside>
 
 <div id="toast"></div>
-<template id="notes-dialog"><div class="modal"><div class="card notes"><h2 class="notes-title">What's new</h2><div class="notes-body"></div><button class="primary close">Got it</button></div></div></template>
+<template id="notes-dialog"><div class="modal"><div class="card notes"><h2 class="notes-title">What's new</h2><p class="notes-sub muted small"></p><div class="notes-body"></div><div class="row tight notes-actions"><button class="primary act" hidden></button><span class="grow"></span><button class="close">Close</button></div></div></div></template>
 <template id="share-dialog"><div class="modal"><div class="card"><h2>Send to a phone</h2><p class="muted small">On the phone: Receive → Scan a QR code. The link works for 30 minutes; the phone pulls the file straight from this desktop.</p><div class="qr"></div><code class="wrap"></code><label class="check"><input type="checkbox" class="share-friend"> Send a friend request with it</label><p class="muted small">With the request, the link also carries your public key and name; the receiver can accept it with one tap.</p><button class="primary close">Done</button></div></div></template>
 <script src="/app.js"></script>
 </body>
